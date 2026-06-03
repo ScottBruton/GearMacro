@@ -6,6 +6,11 @@
 Public DebugLog As String
 Private mFrontPlaneName As String
 Private mAxisName As String
+Private mSketchOffsetXM As Double
+Private mSketchOffsetYM As Double
+Private mGearSolidBodyCountBefore As Long
+Private Const SW_DIM_TYPE_DIAMETER As Long = 6
+Private Const SW_DIM_TYPE_RADIAL As Long = 5
 
 ' swEndConditions_e / swStartConditions_e (numeric when enums not imported)
 Private Const SW_END_BLIND As Long = 0
@@ -15,6 +20,8 @@ Private Const SW_START_SKETCH_PLANE As Long = 0
 ' Gear train metadata (custom properties + named sketch dimensions)
 Public Const GEAR_DIM_ADDENDUM_RADIUS As String = "InvoluteGear_Da_Radius"
 Public Const GEAR_DIM_DEDENDUM_RADIUS As String = "InvoluteGear_Dd_Radius"
+Public Const GEAR_DIM_ADDENDUM_DIAMETER As String = "InvoluteGear_Da_Diameter"
+Public Const GEAR_DIM_DEDENDUM_DIAMETER As String = "InvoluteGear_Dd_Diameter"
 Public Const GEAR_DIM_MODULE As String = "InvoluteGear_Module"
 Public Const GEAR_DIM_NUM_TEETH As String = "InvoluteGear_NumTeeth"
 Public Const GEAR_DIM_PRESSURE_ANGLE As String = "InvoluteGear_PressureAngle"
@@ -32,6 +39,41 @@ Public Sub DebugPrint(ByVal msg As String)
     Debug.Print msg
     DebugLog = DebugLog & msg & vbCrLf
 End Sub
+
+Public Sub ResetGearSketchOffset()
+    mSketchOffsetXM = 0#
+    mSketchOffsetYM = 0#
+End Sub
+
+Public Sub SetGearTrainSketchOffsetFromLayout()
+    Dim cM As Double
+    Dim aRad As Double
+    If GearTrainRole <> GEAR_ROLE_DRIVEN Then
+        ResetGearSketchOffset
+        Exit Sub
+    End If
+    cM = GearTrainCenterDistanceMM / MM_PER_M
+    aRad = GearTrainMeshAngleDeg * Pi / 180#
+    mSketchOffsetXM = cM * Cos(aRad)
+    mSketchOffsetYM = cM * Sin(aRad)
+    DebugPrint "Driven gear sketch center offset (m): " & Format(mSketchOffsetXM, "0.####") & ", " & Format(mSketchOffsetYM, "0.####")
+End Sub
+
+Public Sub CaptureSolidBodyCountBeforeGearBuild()
+    Dim vBodies As Variant
+    On Error Resume Next
+    mGearSolidBodyCountBefore = 0
+    If swPart Is Nothing Then Exit Sub
+    vBodies = swPart.GetBodies2(swSolidBody, False)
+    If IsEmpty(vBodies) Then Exit Sub
+    If IsArray(vBodies) Then mGearSolidBodyCountBefore = UBound(vBodies) - LBound(vBodies) + 1
+    On Error GoTo 0
+End Sub
+
+' Body name: {teeth}T {pitch diameter mm}  e.g. 100T 125  (X in "XT" = tooth count, not letter X)
+Public Function BuildGearBodyName() As String
+    BuildGearBodyName = CStr(GearGeom.NumTeeth) & "T " & Format(GearGeom.PitchDiameterMM, "0.###")
+End Function
 
 ' ---------------------------------------------------------------------------
 ' 1. ReadGearInputsFromForm
@@ -256,6 +298,11 @@ Private Function BeginSketchOnFrontPlane() As Boolean
 End Function
 
 Private Function CreateGearAxis() As Boolean
+    If Abs(mSketchOffsetXM) > 0.0000000001 Or Abs(mSketchOffsetYM) > 0.0000000001 Then
+        CreateGearAxis = CreateGearAxisAtSketchCenter()
+        Exit Function
+    End If
+
     Dim swTopPlaneFeat As SldWorks.Feature
     Dim swRightPlaneFeat As SldWorks.Feature
 
@@ -318,6 +365,44 @@ AxisOk:
 
 AxisFail:
     CreateGearAxis = False
+End Function
+
+' Axis through front plane at driven-gear center (sketch point at layout offset)
+Private Function CreateGearAxisAtSketchCenter() As Boolean
+    Dim swSkFeat As SldWorks.Feature
+    Dim skName As String
+    Dim docTitle As String
+    Dim ptName As String
+
+    CreateGearAxisAtSketchCenter = False
+    If swFrontPlaneFeat Is Nothing Then
+        If Not ResolveAndStoreFrontPlane() Then Exit Function
+    End If
+
+    If Not BeginSketchOnFrontPlane() Then Exit Function
+    swSketchManager.CreatePoint mSketchOffsetXM, mSketchOffsetYM, 0#
+    swSketchManager.InsertSketch True
+
+    Set swSkFeat = FindLastSketchFeature()
+    If swSkFeat Is Nothing Then Exit Function
+    skName = swSkFeat.Name
+    docTitle = swDoc.GetTitle
+    ptName = "Point1@" & skName
+    If docTitle <> "" Then ptName = "Point1@" & skName & "@" & docTitle
+
+    ClearSWSelection
+    SelectPlaneFeature swFrontPlaneFeat, True
+    boolstatus = swModelDocExt.SelectByID2(ptName, "EXTSKETCHPOINT", mSketchOffsetXM, mSketchOffsetYM, 0#, True, 0, Nothing, 0)
+    If Not boolstatus Then boolstatus = swModelDocExt.SelectByID2("Point1@" & skName, "EXTSKETCHPOINT", mSketchOffsetXM, mSketchOffsetYM, 0#, True, 0, Nothing, 0)
+    If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
+    If Not boolstatus Then Exit Function
+
+    Set swGearAxisFeat = FindLastRefAxisFeature()
+    If swGearAxisFeat Is Nothing Then Exit Function
+    mAxisName = swGearAxisFeat.Name
+    ClearSWSelection
+    CreateGearAxisAtSketchCenter = True
+    DebugPrint "CreateGearAxisAtSketchCenter OK: " & mAxisName
 End Function
 
 Private Function FindLastSketchFeature() As SldWorks.Feature
@@ -392,10 +477,10 @@ Public Function CreateAddendumBlank() As Boolean
     End If
     Set sw2DSketch = swSketchManager.ActiveSketch
 
-    Set swCircle = swSketchManager.CreateCircleByRadius(0, 0, 0, rM)
+    Set swCircle = swSketchManager.CreateCircleByRadius(mSketchOffsetXM, mSketchOffsetYM, 0, rM)
     If swCircle Is Nothing Then GoTo BlankFail
 
-    NameGearDimensionOnCircle swCircle, GEAR_DIM_ADDENDUM_RADIUS, GearGeom.AddendumRadiusMM
+    AddDiameterDimensionToCircle swCircle, GEAR_DIM_ADDENDUM_DIAMETER, GearGeom.AddendumDiameterMM
 
     swSketchManager.InsertSketch True
     Set swAddendumExtrudeFeat = swFeatMgr.FeatureExtrusion3(True, False, False, 0, 0, GearGeom.WidthM, 0#, _
@@ -521,12 +606,21 @@ Private Function CreateCircleArcBetween(ByVal r As Double, _
     ByVal xStart As Double, ByVal yStart As Double, _
     ByVal xEnd As Double, ByVal yEnd As Double) As SldWorks.SketchSegment
     Dim angS As Double, angE As Double, angM As Double
-    angS = Atn2(yStart, xStart)
-    angE = Atn2(yEnd, xEnd)
+    angS = Atn2(yStart - mSketchOffsetYM, xStart - mSketchOffsetXM)
+    angE = Atn2(yEnd - mSketchOffsetYM, xEnd - mSketchOffsetXM)
     angM = ArcMidAngleShort(angS, angE)
     Set CreateCircleArcBetween = swSketchManager.Create3PointArc( _
-        xStart, yStart, 0, xEnd, yEnd, 0, r * Cos(angM), r * Sin(angM), 0)
+        xStart, yStart, 0, xEnd, yEnd, 0, _
+        mSketchOffsetXM + r * Cos(angM), mSketchOffsetYM + r * Sin(angM), 0)
 End Function
+
+Private Sub OffsetSketchPointArray(ByRef pts() As Double, ByVal n As Long)
+    Dim i As Long
+    For i = 0 To n - 1
+        pts(i * 3) = pts(i * 3) + mSketchOffsetXM
+        pts(i * 3 + 1) = pts(i * 3 + 1) + mSketchOffsetYM
+    Next i
+End Sub
 
 Private Sub SnapGapSplineEndsToCircles(ByRef ptsFlank() As Double, ByVal n As Long, ByVal ra As Double, ByVal rr As Double)
     SnapPointToRadius rr, ptsFlank(0), ptsFlank(1)
@@ -643,6 +737,9 @@ Public Function CreateToothGapSketch() As Boolean
     Next i
     SnapGapSplineEndsToCircles ptsNextLeft, n, ra, rr
 
+    OffsetSketchPointArray ptsRight, n
+    OffsetSketchPointArray ptsNextLeft, n
+
     xRootA = ptsRight(0): yRootA = ptsRight(1)
     xTipA = ptsRight((n - 1) * 3): yTipA = ptsRight((n - 1) * 3 + 1)
     xRootB = ptsNextLeft(0): yRootB = ptsNextLeft(1)
@@ -656,6 +753,9 @@ Public Function CreateToothGapSketch() As Boolean
     ' Arcs use exact spline corner coords; CW on Da/Dd; high-Y end on flank A
     sketchStep = "gap tip and root arcs"
     If Not AddGapTipRootArcs(ra, rr, xRootA, yRootA, xRootB, yRootB, xTipA, yTipA, xTipB, yTipB) Then GoTo SketchFail
+
+    AddDiameterDimensionOnConstructionCircle xTipA, yTipA, GEAR_DIM_ADDENDUM_DIAMETER, GearGeom.AddendumDiameterMM
+    AddDiameterDimensionOnConstructionCircle xRootA, yRootA, GEAR_DIM_DEDENDUM_DIAMETER, GearGeom.DedendumDiameterMM
 
     sketchStep = "coincident corners"
     ConstrainGapSketchClosed
@@ -1211,6 +1311,176 @@ ReadFail:
     ReadGearMetadataFromDoc = False
 End Function
 
+Private Function TryParseGearBodyName(ByVal bodyName As String, ByRef pitchDiameterMM As Double, ByRef numTeeth As Long) As Boolean
+    Dim s As String
+    Dim rest As String
+    Dim zPart As String
+    Dim teethPart As String
+    Dim diaPart As String
+    Dim i As Long
+    Dim ch As String
+    Dim tPos As Long
+
+    TryParseGearBodyName = False
+    pitchDiameterMM = 0#
+    numTeeth = 0
+    s = Trim$(bodyName)
+    If Len(s) < 3 Then Exit Function
+
+    ' Current format: {teeth}T {pitch dia}  e.g. 100T 125
+    i = 1
+    Do While i <= Len(s)
+        ch = Mid$(s, i, 1)
+        If ch >= "0" And ch <= "9" Then
+            i = i + 1
+        Else
+            Exit Do
+        End If
+    Loop
+    If i >= 2 Then
+        teethPart = Left$(s, i - 1)
+        tPos = i
+        If UCase$(Mid$(s, tPos, 1)) = "T" Then
+            rest = Trim$(Mid$(s, tPos + 1))
+            If rest <> "" Then
+                i = 1
+                Do While i <= Len(rest)
+                    ch = Mid$(rest, i, 1)
+                    If (ch >= "0" And ch <= "9") Or ch = "." Then
+                        i = i + 1
+                    Else
+                        Exit Do
+                    End If
+                Loop
+                If i >= 2 Then
+                    diaPart = Left$(rest, i - 1)
+                    numTeeth = CLng(teethPart)
+                    pitchDiameterMM = CDbl(diaPart)
+                    If numTeeth >= 3 And pitchDiameterMM > 0# Then
+                        TryParseGearBodyName = True
+                        Exit Function
+                    End If
+                End If
+            End If
+        End If
+    End If
+
+    ' Legacy: XT {pitch} z{teeth}  e.g. XT 125 z100
+    If Len(s) < 4 Then Exit Function
+    If UCase$(Left$(s, 2)) <> "XT" Then Exit Function
+    If Mid$(s, 3, 1) <> " " And Mid$(s, 3, 1) <> vbTab Then Exit Function
+    rest = Trim$(Mid$(s, 4))
+    If rest = "" Then Exit Function
+
+    i = 1
+    Do While i <= Len(rest)
+        ch = Mid$(rest, i, 1)
+        If (ch >= "0" And ch <= "9") Or ch = "." Then
+            i = i + 1
+        Else
+            Exit Do
+        End If
+    Loop
+    If i < 2 Then Exit Function
+    pitchDiameterMM = CDbl(Left$(rest, i - 1))
+
+    zPart = Trim$(Mid$(rest, i))
+    If zPart = "" Then Exit Function
+    If UCase$(Left$(zPart, 1)) = "Z" Then zPart = Trim$(Mid$(zPart, 2))
+    If zPart = "" Then Exit Function
+    numTeeth = CLng(zPart)
+    If numTeeth < 3 Then Exit Function
+    TryParseGearBodyName = True
+End Function
+
+Public Function ReadGearMetadataFromBody(ByVal swBody As SldWorks.Body2, ByVal swPartDoc As SldWorks.ModelDoc2, _
+    ByRef moduleMM As Double, ByRef numTeeth As Long, ByRef pressureDeg As Double, ByRef widthMM As Double) As Boolean
+    Dim pitchDia As Double
+    Dim swExt As SldWorks.ModelDocExtension
+
+    ReadGearMetadataFromBody = False
+    pressureDeg = 20#
+    widthMM = GearGeom.WidthMM
+    If widthMM <= 0# Then widthMM = 10#
+
+    If Not swBody Is Nothing Then
+        If TryParseGearBodyName(swBody.Name, pitchDia, numTeeth) Then
+            moduleMM = pitchDia / CDbl(numTeeth)
+            If swPartDoc Is Nothing Then GoTo BodyMetaOk
+            Set swExt = swPartDoc.Extension
+            If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_PRESSURE, pressureDeg) Then pressureDeg = 20#
+            If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_WIDTH, widthMM) Then widthMM = 10#
+BodyMetaOk:
+            ReadGearMetadataFromBody = True
+            Exit Function
+        End If
+    End If
+
+    If Not swPartDoc Is Nothing Then
+        ReadGearMetadataFromBody = ReadGearMetadataFromDoc(swPartDoc, moduleMM, numTeeth, pressureDeg, widthMM)
+    End If
+End Function
+
+Public Function FindSolidBodyByName(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal bodyName As String) As SldWorks.Body2
+    Dim swPart As SldWorks.PartDoc
+    Dim vBodies As Variant
+    Dim swBody As SldWorks.Body2
+    Dim i As Long
+
+    Set FindSolidBodyByName = Nothing
+    If swPartDoc Is Nothing Or bodyName = "" Then Exit Function
+    If swPartDoc.GetType <> swDocumentTypes_e.swDocPART Then Exit Function
+    Set swPart = swPartDoc
+    vBodies = swPart.GetBodies2(swBodyType_e.swSolidBody, True)
+    If IsEmpty(vBodies) Then Exit Function
+    For i = LBound(vBodies) To UBound(vBodies)
+        Set swBody = vBodies(i)
+        If StrComp(Trim$(swBody.Name), bodyName, vbTextCompare) = 0 Then
+            Set FindSolidBodyByName = swBody
+            Exit Function
+        End If
+    Next i
+End Function
+
+Public Function IsMacroGearBody(ByVal swBody As SldWorks.Body2, ByVal swPartDoc As SldWorks.ModelDoc2) As Boolean
+    Dim modMM As Double
+    Dim z As Long
+    Dim pa As Double
+    Dim w As Double
+    IsMacroGearBody = ReadGearMetadataFromBody(swBody, swPartDoc, modMM, z, pa, w)
+End Function
+
+Public Sub NameGearSolidBodyAfterBuild()
+    Dim vBodies As Variant
+    Dim swBody As SldWorks.Body2
+    Dim i As Long
+    Dim nBodies As Long
+    Dim newName As String
+    Dim idxNew As Long
+
+    On Error Resume Next
+    newName = BuildGearBodyName()
+    If swPart Is Nothing Then Exit Sub
+    vBodies = swPart.GetBodies2(swSolidBody, False)
+    If IsEmpty(vBodies) Then Exit Sub
+    If IsArray(vBodies) Then
+        nBodies = UBound(vBodies) - LBound(vBodies) + 1
+    Else
+        nBodies = 1
+    End If
+
+    idxNew = nBodies - 1
+    If nBodies > mGearSolidBodyCountBefore Then idxNew = mGearSolidBodyCountBefore
+    If idxNew < LBound(vBodies) Then idxNew = LBound(vBodies)
+    If idxNew > UBound(vBodies) Then idxNew = UBound(vBodies)
+
+    Set swBody = vBodies(idxNew)
+    If swBody Is Nothing Then Exit Sub
+    swBody.Name = newName
+    DebugPrint "Named gear solid body: " & newName
+    On Error GoTo 0
+End Sub
+
 Private Sub ClearDrivingGearComboList()
     GearTrainDrivingComboCount = 0
     Erase GearTrainDrivingComboPartTitle
@@ -1234,7 +1504,7 @@ Private Function BodyDisplayName(ByVal swBody As SldWorks.Body2, ByVal index1 As
     On Error GoTo 0
 End Function
 
-Private Function FindOpenPartDocumentByTitle(ByVal partTitle As String) As SldWorks.ModelDoc2
+Public Function FindOpenPartDocumentByTitle(ByVal partTitle As String) As SldWorks.ModelDoc2
     Dim swDocWalk As SldWorks.ModelDoc2
     On Error Resume Next
     Set FindOpenPartDocumentByTitle = Nothing
@@ -1261,41 +1531,28 @@ Private Function DrivingGearComboDisplayText(ByVal partTitle As String, ByVal bo
     End If
 End Function
 
-Private Sub AddSolidBodiesFromPartToCombo(ByVal swPartDoc As SldWorks.ModelDoc2)
+Private Sub AddMacroGearBodiesFromPartToCombo(ByVal swPartDoc As SldWorks.ModelDoc2)
     Dim swPart As SldWorks.PartDoc
     Dim vBodies As Variant
     Dim swBody As SldWorks.Body2
     Dim i As Long
-    Dim nBodies As Long
     Dim partTitle As String
     Dim bodyName As String
-    Dim modMM As Double
-    Dim z1 As Long
-    Dim pa As Double
-    Dim w As Double
-    Dim hasMeta As Boolean
 
     If swPartDoc Is Nothing Then Exit Sub
     If swPartDoc.GetType <> swDocumentTypes_e.swDocPART Then Exit Sub
     Set swPart = swPartDoc
     partTitle = swPartDoc.GetTitle
-    hasMeta = ReadGearMetadataFromDoc(swPartDoc, modMM, z1, pa, w)
-    If Not hasMeta Then
-        AppendDrivingGearComboEntry partTitle, "(not a macro gear — generate driving gear first)"
-        Exit Sub
-    End If
 
     vBodies = swPart.GetBodies2(swBodyType_e.swSolidBody, True)
-    If IsEmpty(vBodies) Then
-        AppendDrivingGearComboEntry partTitle, "(no solid bodies)"
-        Exit Sub
-    End If
+    If IsEmpty(vBodies) Then Exit Sub
 
-    nBodies = UBound(vBodies) - LBound(vBodies) + 1
     For i = LBound(vBodies) To UBound(vBodies)
         Set swBody = vBodies(i)
         bodyName = BodyDisplayName(swBody, i - LBound(vBodies) + 1)
-        AppendDrivingGearComboEntry partTitle, bodyName
+        If IsMacroGearBody(swBody, swPartDoc) Then
+            AppendDrivingGearComboEntry partTitle, bodyName
+        End If
     Next i
 End Sub
 
@@ -1333,38 +1590,41 @@ NextComp:
     Next i
 End Sub
 
-' Rebuild list from active document; returns item count (0 = none / placeholder only)
+' Rebuild list from all open parts (and assembly macro gear components)
 Public Function RefreshDrivingGearBodyComboList() As Long
-    Dim swActive As SldWorks.ModelDoc2
+    Dim swWalk As SldWorks.ModelDoc2
 
     ClearDrivingGearComboList
     Set swApp = Application.SldWorks
-    Set swActive = swApp.ActiveDoc
     RefreshDrivingGearBodyComboList = 0
 
-    If swActive Is Nothing Then
-        AppendDrivingGearComboEntry "", "(no document open)"
+    If swApp Is Nothing Then
+        AppendDrivingGearComboEntry "", "(SolidWorks not running)"
         RefreshDrivingGearBodyComboList = GearTrainDrivingComboCount
         Exit Function
     End If
 
-    Select Case swActive.GetType
-        Case swDocumentTypes_e.swDocPART
-            AddSolidBodiesFromPartToCombo swActive
-        Case swDocumentTypes_e.swDocASSEMBLY
-            AddMacroGearsFromAssemblyToCombo swActive
-            If GearTrainDrivingComboCount = 0 Then
-                AppendDrivingGearComboEntry swActive.GetTitle, "(no macro-built gear components)"
-            End If
-        Case Else
-            AppendDrivingGearComboEntry swActive.GetTitle, "(open a part or assembly)"
-    End Select
+    Set swWalk = swApp.GetFirstDocument
+    Do While Not swWalk Is Nothing
+        Select Case swWalk.GetType
+            Case swDocumentTypes_e.swDocPART
+                AddMacroGearBodiesFromPartToCombo swWalk
+            Case swDocumentTypes_e.swDocASSEMBLY
+                AddMacroGearsFromAssemblyToCombo swWalk
+        End Select
+        Set swWalk = swWalk.GetNext
+    Loop
+
+    If GearTrainDrivingComboCount = 0 Then
+        AppendDrivingGearComboEntry "", "(no macro gears — name bodies ""teethT pitchDia"" e.g. 100T 125, or generate a driving gear)"
+    End If
 
     RefreshDrivingGearBodyComboList = GearTrainDrivingComboCount
 End Function
 
 Public Function DrivingGearComboItemCaption(ByVal index As Long) As String
     Dim swPartDoc As SldWorks.ModelDoc2
+    Dim swBody As SldWorks.Body2
     Dim modMM As Double
     Dim z1 As Long
     Dim pa As Double
@@ -1382,13 +1642,14 @@ Public Function DrivingGearComboItemCaption(ByVal index As Long) As String
         Exit Function
     End If
     Set swPartDoc = FindOpenPartDocumentByTitle(partTitle)
-    hasMeta = False
-    If Not swPartDoc Is Nothing Then hasMeta = ReadGearMetadataFromDoc(swPartDoc, modMM, z1, pa, w)
+    Set swBody = FindSolidBodyByName(swPartDoc, bodyName)
+    hasMeta = ReadGearMetadataFromBody(swBody, swPartDoc, modMM, z1, pa, w)
     DrivingGearComboItemCaption = DrivingGearComboDisplayText(partTitle, bodyName, hasMeta, z1, modMM)
 End Function
 
 Public Function ApplyDrivingGearFromComboIndex(ByVal index As Long) As Boolean
     Dim swPartDoc As SldWorks.ModelDoc2
+    Dim swBody As SldWorks.Body2
     Dim partTitle As String
     Dim bodyName As String
     Dim modMM As Double
@@ -1405,7 +1666,8 @@ Public Function ApplyDrivingGearFromComboIndex(ByVal index As Long) As Boolean
 
     Set swPartDoc = FindOpenPartDocumentByTitle(partTitle)
     If swPartDoc Is Nothing Then Exit Function
-    If Not ReadGearMetadataFromDoc(swPartDoc, modMM, z1, pa, w) Then Exit Function
+    Set swBody = FindSolidBodyByName(swPartDoc, bodyName)
+    If Not ReadGearMetadataFromBody(swBody, swPartDoc, modMM, z1, pa, w) Then Exit Function
 
     GearTrainDrivingPartTitle = partTitle
     GearTrainDrivingBodyLabel = bodyName
@@ -1472,16 +1734,20 @@ Public Function PickDrivingGearBodyFromSelection() As Boolean
 
     If swPartDoc Is Nothing Then Exit Function
     If swPartDoc.GetType <> swDocumentTypes_e.swDocPART Then Exit Function
-    If Not ReadGearMetadataFromDoc(swPartDoc, modMM, z1, pa, w) Then Exit Function
+    If Not ReadGearMetadataFromBody(swBody, swPartDoc, modMM, z1, pa, w) Then Exit Function
 
     GearTrainDrivingPartTitle = swPartDoc.GetTitle
-    GearTrainDrivingBodyLabel = "Solid Body"
+    If Not swBody Is Nothing Then
+        GearTrainDrivingBodyLabel = Trim$(swBody.Name)
+    Else
+        GearTrainDrivingBodyLabel = "Solid Body"
+    End If
     GearTrainDrivingModuleMM = modMM
     GearTrainDrivingTeeth = z1
     GearTrainDrivingPressureDeg = pa
     GearTrainDrivingWidthMM = w
     PickDrivingGearBodyFromSelection = True
-    DebugPrint "Picked driving gear: " & GearTrainDrivingPartTitle & " z=" & z1 & " m=" & modMM
+    DebugPrint "Picked driving gear: " & GearTrainDrivingPartTitle & " / " & GearTrainDrivingBodyLabel & " z=" & z1 & " m=" & modMM
 End Function
 
 Public Function ApplyDrivenGearInputsFromDrivingGear() As Boolean
@@ -1499,10 +1765,57 @@ Public Function ApplyDrivenGearInputsFromDrivingGear() As Boolean
 End Function
 
 ' Sketch dimension names (InvoluteGear_*) complement custom properties on the part.
-Public Sub NameGearDimensionOnCircle(ByVal swCircle As SldWorks.SketchSegment, ByVal dimName As String, ByVal radiusMM As Double)
+Public Sub AddDiameterDimensionToCircle(ByVal swCircle As SldWorks.SketchSegment, ByVal dimName As String, ByVal diameterMM As Double)
+    Dim diameterM As Double
+    Dim radiusM As Double
+    Dim dimX As Double
+    Dim dimY As Double
+    Dim swDispDim As Object
+    Dim swDim As SldWorks.Dimension
+    Dim showInput As Boolean
+    Dim dispType As Long
+
     On Error Resume Next
-    If swCircle Is Nothing Then Exit Sub
+    If swCircle Is Nothing Or swDoc Is Nothing Then Exit Sub
+    diameterM = diameterMM / MM_PER_M
+    radiusM = diameterM / 2#
+    dimX = mSketchOffsetXM + radiusM * 0.85
+    dimY = mSketchOffsetYM
+
     swCircle.Select4 False, Nothing
+    showInput = swApp.GetUserPreferenceToggle(swUserPreferenceToggle_e.swInputDimValOnCreate)
+    swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swInputDimValOnCreate, False
+
+    Set swDispDim = swModelDocExt.AddDimension(dimX, dimY, 0#, 2) ' swSmartDimensionDirection_Right
+    If swDispDim Is Nothing Then Set swDispDim = swDoc.AddDimension2(dimX, dimY, 0#)
+
+    swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swInputDimValOnCreate, showInput
+
+    If Not swDispDim Is Nothing Then
+        Set swDim = swDispDim.GetDimension2(0)
+        If Not swDim Is Nothing Then
+            dispType = swDispDim.Type2
+            If dispType = SW_DIM_TYPE_RADIAL Then
+                swDim.SystemValue = radiusM
+            Else
+                swDim.SystemValue = diameterM
+            End If
+            swDim.Name = dimName
+        End If
+    End If
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+' Tooth-gap sketch: full construction circle so SW creates Ø (diameter), not R (radius)
+Private Sub AddDiameterDimensionOnConstructionCircle(ByVal ptOnCircleX As Double, ByVal ptOnCircleY As Double, _
+    ByVal dimName As String, ByVal diameterMM As Double)
+    Dim swConstrCirc As SldWorks.SketchSegment
+    On Error Resume Next
+    Set swConstrCirc = swSketchManager.CreateCircle(mSketchOffsetXM, mSketchOffsetYM, 0, ptOnCircleX, ptOnCircleY, 0)
+    If swConstrCirc Is Nothing Then Exit Sub
+    swConstrCirc.ConstructionGeometry = True
+    AddDiameterDimensionToCircle swConstrCirc, dimName, diameterMM
     On Error GoTo 0
 End Sub
 

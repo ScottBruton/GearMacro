@@ -9,8 +9,9 @@
 '   optDrivenGear    OptionButton  Caption "Driven gear"    GroupName = "GearRole"
 '   fraDrivenGear    Frame         Caption "Driven gear layout"
 '   lblDrivingGear   Label         Caption "Driving gear:"
-'   cboDrivingGearBody ComboBox    Style=2 — solid bodies in active part (body name = last feature, e.g. CirPattern1)
-'                                  Gear is identified by InvoluteGear custom properties on the PART, not body name.
+'   btnCancel / cbCancel / btnClose — call CloseGearForm (ends main() DoEvents loop)
+'   cboDrivingGearBody ComboBox    Style=2 — macro gears from all open parts
+'                                  Bodies named ""teethT pitchDia"" (e.g. 9T 11.25) or InvoluteGear custom properties
 '   tbDrivingGearBody TextBox      Optional summary; Locked=True
 '   btnRefreshDrivingGear CommandButton Caption "Refresh list" (or keep btnPickDrivingBody name)
 '   lblMeshAngle     Label         Caption "Mesh angle (deg, 0=inline):"
@@ -365,11 +366,28 @@ End Sub
 
 Private Sub UserForm_QueryClose(Cancel As Integer, CloseMode As Integer)
     gbGearFormOpen = False
+    Cancel = False
+End Sub
+
+Private Sub UserForm_Terminate()
+    gbGearFormOpen = False
 End Sub
 
 Private Sub btnClose_Click()
-    gbGearFormOpen = False
-    Unload Me
+    CloseGearForm
+End Sub
+
+Private Sub btnCancel_Click()
+    CloseGearForm
+End Sub
+
+Private Sub cbCancel_Click()
+    CloseGearForm
+End Sub
+
+Private Sub CommandButton1_Click()
+    ' Some forms name the cancel control CommandButton1
+    CloseGearForm
 End Sub
 
 Private Sub tbMeshAngle_Change()
