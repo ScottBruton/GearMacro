@@ -1,0 +1,1145 @@
+' Involute spur gear generator - siloed, testable functions
+' Workflow: axis -> addendum blank boss -> tooth-gap sketch -> cut extrude -> circular pattern cut
+'
+' Requires Involute1 module: GearGeometry type, GearGeom, Pi, swApp globals, GenerateGear
+
+Public DebugLog As String
+Private mFrontPlaneName As String
+Private mAxisName As String
+
+' swEndConditions_e / swStartConditions_e (numeric when enums not imported)
+Private Const SW_END_BLIND As Long = 0
+Private Const SW_END_THROUGH_ALL As Long = 1
+Private Const SW_START_SKETCH_PLANE As Long = 0
+
+Public Sub DebugPrint(ByVal msg As String)
+    Debug.Print msg
+    DebugLog = DebugLog & msg & vbCrLf
+End Sub
+
+' ---------------------------------------------------------------------------
+' 1. ReadGearInputsFromForm
+'    Reads and validates UserForm1 values; populates GearGeom inputs (mm).
+' ---------------------------------------------------------------------------
+Public Function ReadGearInputsFromForm() As Boolean
+    On Error GoTo ReadFail
+
+    GearGeom.PressureAngleDeg = CDbl(UserForm1.tbPressureAngle.Text)
+    GearGeom.ModuleMM = CDbl(UserForm1.tbModule.Text)
+    GearGeom.NumTeeth = CLng(UserForm1.tbTeeth.Text)
+    GearGeom.WidthMM = CDbl(UserForm1.tbWidth.Text)
+
+    ReadGearInputsFromForm = ValidateGearInputsPublic(GearGeom.PressureAngleDeg, GearGeom.ModuleMM, GearGeom.NumTeeth, GearGeom.WidthMM)
+    If ReadGearInputsFromForm Then
+        CalculateGearGeometry
+        DebugPrint "ReadGearInputsFromForm OK"
+    End If
+    Exit Function
+
+ReadFail:
+    MsgBox "Could not read form inputs: " & Err.Description, vbCritical
+    ReadGearInputsFromForm = False
+End Function
+
+Public Function ValidateGearInputsPublic(ByVal pressureAngleDeg As Double, ByVal moduleMM As Double, ByVal numTeeth As Long, ByVal widthMM As Double) As Boolean
+    Dim errMsg As String
+    errMsg = ""
+
+    If pressureAngleDeg <= 0# Or pressureAngleDeg >= 90# Then errMsg = errMsg & "Invalid pressure angle." & vbCrLf
+    If moduleMM <= 0# Then errMsg = errMsg & "Invalid module." & vbCrLf
+    If numTeeth < 3 Then errMsg = errMsg & "Tooth count must be >= 3." & vbCrLf
+    If widthMM <= 0# Then errMsg = errMsg & "Invalid width." & vbCrLf
+
+    If errMsg <> "" Then
+        MsgBox errMsg, vbExclamation, "Invalid Gear Inputs"
+        ValidateGearInputsPublic = False
+    Else
+        ValidateGearInputsPublic = True
+    End If
+End Function
+
+' ---------------------------------------------------------------------------
+' 2. CalculateGearGeometry
+'    All dimensions in mm stored in GearGeom; meters only for API radii/width.
+' ---------------------------------------------------------------------------
+Public Sub CalculateGearGeometry()
+    Dim alphaRad As Double
+    Dim z As Double
+
+    Pi = 3.14159265358979
+    z = GearGeom.NumTeeth
+    alphaRad = GearGeom.PressureAngleDeg * Pi / 180#
+
+    GearGeom.PitchDiameterMM = GearGeom.ModuleMM * z
+    GearGeom.PitchRadiusMM = GearGeom.PitchDiameterMM / 2#
+    GearGeom.BaseDiameterMM = GearGeom.PitchDiameterMM * Cos(alphaRad)
+    GearGeom.BaseRadiusMM = GearGeom.BaseDiameterMM / 2#
+    GearGeom.AddendumDiameterMM = GearGeom.PitchDiameterMM + 2# * GearGeom.ModuleMM
+    GearGeom.AddendumRadiusMM = GearGeom.AddendumDiameterMM / 2#
+    GearGeom.DedendumDiameterMM = GearGeom.PitchDiameterMM - 2.5 * GearGeom.ModuleMM
+    GearGeom.DedendumRadiusMM = GearGeom.DedendumDiameterMM / 2#
+
+    GearGeom.CircularPitchMM = Pi * GearGeom.ModuleMM
+    GearGeom.ToothThicknessPitchMM = GearGeom.CircularPitchMM / 2#
+    GearGeom.AngularPitchDeg = 360# / z
+    GearGeom.AngularPitchRad = 2# * Pi / z
+    ' Half tooth at pitch circle: (pi*m/2) / (m*z/2) = pi/z rad total width -> pi/(2z) each side of centerline
+    GearGeom.HalfToothAngleRad = Pi / (2# * z)
+    GearGeom.HalfToothAngleDeg = 90# / z
+
+    GearGeom.BaseLargerThanRoot = (GearGeom.BaseRadiusMM > GearGeom.DedendumRadiusMM)
+
+    ' Involute parameter t: radius r = rb * Sqr(1 + t^2)
+    GearGeom.InvoluteTPitch = InvoluteTFromRadius(GearGeom.BaseRadiusMM, GearGeom.PitchRadiusMM)
+    GearGeom.InvoluteTEnd = InvoluteTFromRadius(GearGeom.BaseRadiusMM, GearGeom.AddendumRadiusMM)
+
+    ' Start involute at dedendum when root circle is outside base (normal for moderate/high tooth counts)
+    GearGeom.InvoluteTStart = InvoluteTFromRadius(GearGeom.BaseRadiusMM, GearGeom.DedendumRadiusMM)
+    If GearGeom.DedendumRadiusMM <= GearGeom.BaseRadiusMM Then
+        GearGeom.InvoluteTStart = 0#
+    End If
+
+    If GearGeom.InvoluteTEnd < GearGeom.InvoluteTStart Then
+        GearGeom.InvoluteTEnd = GearGeom.InvoluteTStart + 0.001
+    End If
+
+    GearGeom.PitchRadiusM = GearGeom.PitchRadiusMM / MM_PER_M
+    GearGeom.BaseRadiusM = GearGeom.BaseRadiusMM / MM_PER_M
+    GearGeom.AddendumRadiusM = GearGeom.AddendumRadiusMM / MM_PER_M
+    GearGeom.DedendumRadiusM = GearGeom.DedendumRadiusMM / MM_PER_M
+    GearGeom.WidthM = GearGeom.WidthMM / MM_PER_M
+
+    DebugPrint "CalculateGearGeometry: Dp=" & Format(GearGeom.PitchDiameterMM, "0.###") & _
+        " Db=" & Format(GearGeom.BaseDiameterMM, "0.###") & _
+        " Dd=" & Format(GearGeom.DedendumDiameterMM, "0.###") & _
+        " Da=" & Format(GearGeom.AddendumDiameterMM, "0.###") & _
+        " rb<rr=" & (Not GearGeom.BaseLargerThanRoot) & " t=[" & Format(GearGeom.InvoluteTStart, "0.####") & _
+        "," & Format(GearGeom.InvoluteTEnd, "0.####") & "]"
+End Sub
+
+Private Function InvoluteTFromRadius(ByVal rbMM As Double, ByVal rMM As Double) As Double
+    If rbMM <= 0# Or rMM <= rbMM Then
+        InvoluteTFromRadius = 0#
+    Else
+        InvoluteTFromRadius = Sqr((rMM / rbMM) ^ 2 - 1#)
+    End If
+End Function
+
+Private Function MMToM(ByVal valueMM As Double) As Double
+    MMToM = valueMM / MM_PER_M
+End Function
+
+Private Sub ClearSWSelection()
+    swDoc.ClearSelection2 True
+End Sub
+
+Private Sub RebuildSWPart()
+    swDoc.EditRebuild3
+End Sub
+
+' Datum plane/axis helpers - use Feature references from tree (SelectByID2 alone is unreliable on NewPart)
+Private Function GetRefPlaneByIndex(ByVal planeIndex As Long) As SldWorks.Feature
+    Dim ft As SldWorks.Feature
+    Dim n As Long
+    n = 0
+    Set ft = swPart.FirstFeature
+    Do While Not ft Is Nothing
+        If ft.GetTypeName2 = "RefPlane" Then
+            n = n + 1
+            If n = planeIndex Then
+                Set GetRefPlaneByIndex = ft
+                Exit Function
+            End If
+        End If
+        Set ft = ft.GetNextFeature
+    Loop
+End Function
+
+Private Function SelectSWPlaneByName(ByVal planeName As String, Optional ByVal append As Boolean = False) As Boolean
+    SelectSWPlaneByName = swModelDocExt.SelectByID2(planeName, "PLANE", 0, 0, 0, append, 0, Nothing, 0)
+End Function
+
+' Resolve front plane from feature tree (1st RefPlane = Front in default templates; same as original macro)
+Private Function ResolveAndStoreFrontPlane() As Boolean
+    Dim desc As String
+
+    Set swFrontPlaneFeat = GetRefPlaneByIndex(1)
+    If swFrontPlaneFeat Is Nothing Then
+        DebugPrint "ResolveAndStoreFrontPlane: no RefPlane in part"
+        ResolveAndStoreFrontPlane = False
+        Exit Function
+    End If
+
+    mFrontPlaneName = swFrontPlaneFeat.Name
+    On Error Resume Next
+    desc = swFrontPlaneFeat.Description
+    On Error GoTo 0
+    If desc <> "" Then mFrontPlaneName = desc
+
+    ResolveAndStoreFrontPlane = True
+    DebugPrint "Front plane resolved: " & mFrontPlaneName & " (feature " & swFrontPlaneFeat.Name & ")"
+End Function
+
+' Call Feature.Select (Sub in VBA - no reliable return value)
+Private Sub SelectPlaneFeature(ByVal planeFeat As SldWorks.Feature, Optional ByVal append As Boolean = True)
+    If planeFeat Is Nothing Then Exit Sub
+    On Error Resume Next
+    planeFeat.Select append
+    On Error GoTo 0
+End Sub
+
+Private Function SelectFrontPlaneFeature(Optional ByVal append As Boolean = False) As Boolean
+    If swFrontPlaneFeat Is Nothing Then
+        If Not ResolveAndStoreFrontPlane() Then
+            SelectFrontPlaneFeature = False
+            Exit Function
+        End If
+    End If
+    If Not append Then ClearSWSelection
+    SelectPlaneFeature swFrontPlaneFeat, append
+    If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then
+        SelectFrontPlaneFeature = SelectSWPlaneByName(mFrontPlaneName, append)
+        If Not SelectFrontPlaneFeature Then SelectFrontPlaneFeature = SelectSWPlaneByName("Front Plane", append)
+    Else
+        SelectFrontPlaneFeature = True
+    End If
+End Function
+
+' Start sketch on front plane - original: RefPlaneFt(1).Select True, InsertSketch True
+' NOTE: Feature.Select is a Sub in SW VBA - do NOT test its return value (always False wrongly)
+Private Function BeginSketchOnFrontPlane() As Boolean
+    Dim selCount As Long
+
+    BeginSketchOnFrontPlane = False
+    Set swFrontPlaneFeat = GetRefPlaneByIndex(1)
+    If swFrontPlaneFeat Is Nothing Then
+        DebugPrint "BeginSketchOnFrontPlane: no front RefPlane"
+        Exit Function
+    End If
+    mFrontPlaneName = swFrontPlaneFeat.Name
+
+    On Error Resume Next
+    swFrontPlaneFeat.Select True
+    selCount = swSelMgr.GetSelectedObjectCount2(-1)
+    If selCount < 1 Then
+        swModelDocExt.SelectByID2 mFrontPlaneName, "PLANE", 0, 0, 0, False, 0, Nothing, 0
+    End If
+    If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then
+        swModelDocExt.SelectByID2 "Front Plane", "PLANE", 0, 0, 0, False, 0, Nothing, 0
+    End If
+    On Error GoTo 0
+
+    swSketchManager.InsertSketch True
+    If swSketchManager.ActiveSketch Is Nothing Then
+        DebugPrint "BeginSketchOnFrontPlane: InsertSketch did not open a sketch"
+        Exit Function
+    End If
+
+    BeginSketchOnFrontPlane = True
+    DebugPrint "BeginSketchOnFrontPlane OK"
+End Function
+
+Private Function CreateGearAxis() As Boolean
+    Dim swTopPlaneFeat As SldWorks.Feature
+    Dim swRightPlaneFeat As SldWorks.Feature
+
+    If swFrontPlaneFeat Is Nothing Then
+        If Not ResolveAndStoreFrontPlane() Then GoTo AxisFail
+    End If
+
+    ClearSWSelection
+
+    ' Method A: exact original sequence - plane.Select True + Point1@Origin
+    SelectPlaneFeature swFrontPlaneFeat, True
+    boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0, 0, 0, True, 0, Nothing, 0)
+    If boolstatus Then
+        boolstatus = swDoc.InsertAxis2(True)
+        If boolstatus Then GoTo AxisOk
+    End If
+
+    ' Method B: SelectByID2 plane + origin
+    ClearSWSelection
+    If SelectSWPlaneByName(mFrontPlaneName, False) Or SelectSWPlaneByName("Front Plane", False) Then
+        boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0, 0, 0, True, 0, Nothing, 0)
+        If Not boolstatus Then boolstatus = swModelDocExt.SelectByID2("Origin", "EXTSKETCHPOINT", 0, 0, 0, True, 0, Nothing, 0)
+        If boolstatus Then
+            boolstatus = swDoc.InsertAxis2(True)
+            If boolstatus Then GoTo AxisOk
+        End If
+    End If
+
+    ' Method C: Top + Right planes -> Z axis (normal to Front sketch plane)
+    ClearSWSelection
+    Set swTopPlaneFeat = GetRefPlaneByIndex(2)
+    Set swRightPlaneFeat = GetRefPlaneByIndex(3)
+    If Not swTopPlaneFeat Is Nothing And Not swRightPlaneFeat Is Nothing Then
+        SelectPlaneFeature swTopPlaneFeat, True
+        SelectPlaneFeature swRightPlaneFeat, True
+        boolstatus = swDoc.InsertAxis2(True)
+        If boolstatus Then GoTo AxisOk
+    End If
+
+    ClearSWSelection
+    If SelectSWPlaneByName("Top Plane", False) Then
+        If SelectSWPlaneByName("Right Plane", True) Then
+            boolstatus = swDoc.InsertAxis2(True)
+            If boolstatus Then GoTo AxisOk
+        End If
+    End If
+
+    DebugPrint "CreateGearAxis: all methods failed"
+    GoTo AxisFail
+
+AxisOk:
+    Set swGearAxisFeat = FindLastRefAxisFeature()
+    If swGearAxisFeat Is Nothing Then Set swGearAxisFeat = swSelMgr.GetSelectedObject5(1)
+    If swGearAxisFeat Is Nothing Then GoTo AxisFail
+    mAxisName = swGearAxisFeat.Name
+    ClearSWSelection
+    CreateGearAxis = True
+    DebugPrint "CreateGearAxis OK: " & mAxisName
+    Exit Function
+
+AxisFail:
+    CreateGearAxis = False
+End Function
+
+Private Function FindLastSketchFeature() As SldWorks.Feature
+    Dim ft As SldWorks.Feature
+    Dim lastSk As SldWorks.Feature
+    Set ft = swDoc.FirstFeature
+    Do While Not ft Is Nothing
+        Select Case ft.GetTypeName2
+            Case "ProfileFeature", "Sketch"
+                Set lastSk = ft
+        End Select
+        Set ft = ft.GetNextFeature
+    Loop
+    Set FindLastSketchFeature = lastSk
+End Function
+
+Private Function FindLastRefAxisFeature() As SldWorks.Feature
+    Dim ft As SldWorks.Feature
+    Dim lastAxis As SldWorks.Feature
+    Set ft = swPart.FirstFeature
+    Do While Not ft Is Nothing
+        If ft.GetTypeName2 = "RefAxis" Then Set lastAxis = ft
+        Set ft = ft.GetNextFeature
+    Loop
+    Set FindLastRefAxisFeature = lastAxis
+End Function
+
+' ---------------------------------------------------------------------------
+' 3. CreateOrResetPart
+' ---------------------------------------------------------------------------
+Public Function CreateOrResetPart() As Boolean
+    On Error GoTo PartFail
+
+    mFrontPlaneName = ""
+    mAxisName = ""
+
+    swDoc.ViewZoomtofit2
+    swDoc.GraphicsRedraw2
+
+    If Not ResolveAndStoreFrontPlane() Then GoTo PartFail
+    If Not CreateGearAxis() Then GoTo PartFail
+
+    swSketchManager.AddToDB = True
+    swSketchManager.AutoSolve = False
+    On Error Resume Next
+    Set swSelData = swSelMgr.CreateSelectData
+    On Error GoTo 0
+
+    ' Do not rebuild here - rebuild before root sketch breaks plane.Select on NewPart
+    DebugPrint "CreateOrResetPart OK"
+    CreateOrResetPart = True
+    Exit Function
+
+PartFail:
+    DebugPrint "CreateOrResetPart FAIL: " & Err.Number & " " & Err.Description
+    CreateOrResetPart = False
+End Function
+
+' ---------------------------------------------------------------------------
+' 4. CreateAddendumBlank - full disk at outer (addendum) diameter
+' ---------------------------------------------------------------------------
+Public Function CreateAddendumBlank() As Boolean
+    On Error GoTo BlankFail
+    Dim swCircle As SketchSegment
+    Dim rM As Double
+
+    rM = GearGeom.AddendumRadiusM
+
+    If Not BeginSketchOnFrontPlane() Then
+        DebugPrint "CreateAddendumBlank: BeginSketchOnFrontPlane failed"
+        GoTo BlankFail
+    End If
+    Set sw2DSketch = swSketchManager.ActiveSketch
+
+    Set swCircle = swSketchManager.CreateCircleByRadius(0, 0, 0, rM)
+    If swCircle Is Nothing Then GoTo BlankFail
+
+    swSketchManager.InsertSketch True
+    Set swAddendumExtrudeFeat = swFeatMgr.FeatureExtrusion3(True, False, False, 0, 0, GearGeom.WidthM, 0#, _
+        False, False, False, False, 0, 0, False, False, False, False, True, False, False, 0, 0, False)
+
+    If swAddendumExtrudeFeat Is Nothing Then GoTo BlankFail
+    DebugPrint "Addendum blank feature: " & swAddendumExtrudeFeat.Name
+
+    ClearSWSelection
+    RebuildSWPart
+    DebugPrint "CreateAddendumBlank OK (Da/2=" & Format(GearGeom.AddendumRadiusMM, "0.###") & " mm)"
+    CreateAddendumBlank = True
+    Exit Function
+
+BlankFail:
+    DebugPrint "CreateAddendumBlank FAIL: " & Err.Description
+    CreateAddendumBlank = False
+End Function
+
+' ---------------------------------------------------------------------------
+' 5. GenerateInvolutePoints - one flank, meters, parametric involute
+' ---------------------------------------------------------------------------
+Public Function GenerateInvolutePoints(ByRef outPoints() As Double, ByRef pointCount As Long) As Boolean
+    On Error GoTo GenPtsFail
+
+    Dim i As Long
+    Dim t As Double
+    Dim rb As Double
+    Dim x As Double
+    Dim y As Double
+    Dim rotAngle As Double
+    Dim tPitch As Double
+    Dim xPitch As Double
+    Dim yPitch As Double
+    Dim phiPitch As Double
+
+    rb = GearGeom.BaseRadiusM
+    pointCount = INVOLUTE_POINT_COUNT
+    ReDim outPoints(0 To pointCount * 3 - 1)
+
+    InvoluteXY GearGeom.InvoluteTPitch, rb, xPitch, yPitch
+    phiPitch = Atn2(yPitch, xPitch)
+    rotAngle = GearGeom.HalfToothAngleRad - phiPitch
+
+    For i = 0 To pointCount - 1
+        If pointCount = 1 Then
+            t = GearGeom.InvoluteTStart
+        Else
+            t = GearGeom.InvoluteTStart + (GearGeom.InvoluteTEnd - GearGeom.InvoluteTStart) * CDbl(i) / CDbl(pointCount - 1)
+        End If
+        InvoluteXY t, rb, x, y
+        RotatePoint x, y, rotAngle, x, y
+        outPoints(i * 3) = x
+        outPoints(i * 3 + 1) = y
+        outPoints(i * 3 + 2) = 0#
+    Next i
+
+    DebugPrint "GenerateInvolutePoints OK (" & pointCount & " points, rot=" & Format(rotAngle * 180# / Pi, "0.###") & " deg)"
+    GenerateInvolutePoints = True
+    Exit Function
+
+GenPtsFail:
+    DebugPrint "GenerateInvolutePoints FAIL: " & Err.Description
+    GenerateInvolutePoints = False
+End Function
+
+Private Sub InvoluteXY(ByVal t As Double, ByVal rb As Double, ByRef x As Double, ByRef y As Double)
+    x = rb * (Cos(t) + t * Sin(t))
+    y = rb * (Sin(t) - t * Cos(t))
+End Sub
+
+' VBA has no built-in Atn2 (unlike VB.NET); required for involute arc angles
+Public Function Atn2(ByVal y As Double, ByVal x As Double) As Double
+    If x > 0# Then
+        Atn2 = Atn(y / x)
+    ElseIf x < 0# Then
+        Atn2 = Atn(y / x) + Pi
+    ElseIf y > 0# Then
+        Atn2 = Pi / 2#
+    ElseIf y < 0# Then
+        Atn2 = -Pi / 2#
+    Else
+        Atn2 = 0#
+    End If
+End Function
+
+' ---------------------------------------------------------------------------
+' 6. RotatePoint
+' ---------------------------------------------------------------------------
+Public Sub RotatePoint(ByVal xIn As Double, ByVal yIn As Double, ByVal angleRad As Double, ByRef xOut As Double, ByRef yOut As Double)
+    Dim c As Double
+    Dim s As Double
+    c = Cos(angleRad)
+    s = Sin(angleRad)
+    xOut = xIn * c - yIn * s
+    yOut = xIn * s + yIn * c
+End Sub
+
+' Force point onto circle (keeps angle); ties spline ends to addendum / dedendum
+Private Sub SnapPointToRadius(ByVal rTarget As Double, ByRef x As Double, ByRef y As Double)
+    Dim r As Double
+    r = Sqr(x * x + y * y)
+    If r > 0.0000000001 Then
+        x = rTarget * x / r
+        y = rTarget * y / r
+    End If
+End Sub
+
+' Minor arc between two angles (short way on circle — between teeth, not around the blank)
+Private Function ArcMidAngleShort(ByVal angStart As Double, ByVal angEnd As Double) As Double
+    Dim span As Double
+    span = angEnd - angStart
+    Do While span > Pi
+        span = span - 2# * Pi
+    Loop
+    Do While span <= -Pi
+        span = span + 2# * Pi
+    Loop
+    ArcMidAngleShort = angStart + span / 2#
+End Function
+
+Private Function CreateCircleArcBetween(ByVal r As Double, _
+    ByVal xStart As Double, ByVal yStart As Double, _
+    ByVal xEnd As Double, ByVal yEnd As Double) As SldWorks.SketchSegment
+    Dim angS As Double, angE As Double, angM As Double
+    angS = Atn2(yStart, xStart)
+    angE = Atn2(yEnd, xEnd)
+    angM = ArcMidAngleShort(angS, angE)
+    Set CreateCircleArcBetween = swSketchManager.Create3PointArc( _
+        xStart, yStart, 0, xEnd, yEnd, 0, r * Cos(angM), r * Sin(angM), 0)
+End Function
+
+Private Sub SnapGapSplineEndsToCircles(ByRef ptsFlank() As Double, ByVal n As Long, ByVal ra As Double, ByVal rr As Double)
+    SnapPointToRadius rr, ptsFlank(0), ptsFlank(1)
+    SnapPointToRadius ra, ptsFlank((n - 1) * 3), ptsFlank((n - 1) * 3 + 1)
+End Sub
+
+' Coincident between spline end and arc end so the cut contour is closed
+Private Sub CoincidentSketchEnds(ByVal seg1 As SldWorks.SketchSegment, ByVal useEnd1 As Boolean, _
+    ByVal seg2 As SldWorks.SketchSegment, ByVal useEnd2 As Boolean)
+    Dim sp1 As SldWorks.SketchPoint
+    Dim sp2 As SldWorks.SketchPoint
+    On Error Resume Next
+    If useEnd1 Then Set sp1 = seg1.GetEndPoint2 Else Set sp1 = seg1.GetStartPoint2
+    If useEnd2 Then Set sp2 = seg2.GetEndPoint2 Else Set sp2 = seg2.GetStartPoint2
+    If sp1 Is Nothing Or sp2 Is Nothing Then Exit Sub
+    sp1.Select4 False, Nothing
+    sp2.Select4 True, Nothing
+    swDoc.SketchAddConstraints "sgCOINCIDENT"
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+Private Sub ConstrainGapSketchClosed()
+    On Error Resume Next
+    swSketchManager.AddToDB = False
+    swSketchManager.AutoSolve = True
+    ' Flank A: root=start, tip=end. Tip arc: start=high Y (A tip), end=B tip. Root arc: start=high Y root, end=B root
+    CoincidentSketchEnds swInvoluteSpline, False, swRootArc, False      ' A root -> root arc start
+    CoincidentSketchEnds swInvoluteSpline, True, swTipLandArc, False     ' A tip -> tip arc start
+    CoincidentSketchEnds swMirroredInvoluteSpline, True, swTipLandArc, True   ' B tip -> tip arc end
+    CoincidentSketchEnds swMirroredInvoluteSpline, False, swRootArc, True     ' B root -> root arc end
+    swSketchManager.AddToDB = True
+    On Error GoTo 0
+End Sub
+
+' Root arc on Dd; tip arc on Da (minor arc between flank ends, not around circumference)
+Private Function AddGapTipRootArcs(ByVal ra As Double, ByVal rr As Double, _
+    ByVal xRootA As Double, ByVal yRootA As Double, ByVal xRootB As Double, ByVal yRootB As Double, _
+    ByVal xTipA As Double, ByVal yTipA As Double, ByVal xTipB As Double, ByVal yTipB As Double) As Boolean
+
+    AddGapTipRootArcs = False
+
+    Set swRootArc = CreateCircleArcBetween(rr, xRootA, yRootA, xRootB, yRootB)
+    If swRootArc Is Nothing Then Exit Function
+
+    Set swTipLandArc = CreateCircleArcBetween(ra, xTipA, yTipA, xTipB, yTipB)
+    If swTipLandArc Is Nothing Then Exit Function
+
+    AddGapTipRootArcs = True
+End Function
+
+' ---------------------------------------------------------------------------
+' 7. CreateToothGapSketch - closed gap between teeth (material removed by cut)
+'    Flank A = right flank of reference tooth; Flank B = left flank of next tooth (+pitch)
+' ---------------------------------------------------------------------------
+Public Function CreateToothGapSketch() As Boolean
+    On Error GoTo SketchFail
+
+    Dim pts() As Double
+    Dim ptsRight() As Double
+    Dim ptsNextLeft() As Double
+    Dim n As Long
+    Dim i As Long
+    Dim ra As Double
+    Dim rr As Double
+    Dim pitch As Double
+    Dim x As Double
+    Dim y As Double
+    Dim xTipA As Double, yTipA As Double
+    Dim xTipB As Double, yTipB As Double
+    Dim xRootA As Double, yRootA As Double
+    Dim xRootB As Double, yRootB As Double
+    Dim sketchStep As String
+    Dim halfPitch As Double
+
+    sketchStep = "init"
+    If Not GenerateInvolutePoints(pts, n) Then GoTo SketchFail
+
+    ra = GearGeom.AddendumRadiusM
+    rr = GearGeom.DedendumRadiusM
+    pitch = GearGeom.AngularPitchRad
+    halfPitch = pitch / 2#
+
+    sketchStep = "begin sketch"
+    If Not BeginSketchOnFrontPlane() Then
+        DebugPrint "CreateToothGapSketch: BeginSketchOnFrontPlane failed"
+        GoTo SketchFail
+    End If
+    Set sw2DSketch = swSketchManager.ActiveSketch
+
+    ' Center gap on +X (reference tooth is at 0; gap center is at half pitch)
+    For i = 0 To n - 1
+        RotatePoint pts(i * 3), pts(i * 3 + 1), -halfPitch, pts(i * 3), pts(i * 3 + 1)
+    Next i
+
+    ' Right flank: root at index 0, tip at n-1 (dedendum -> addendum, same order as flank B)
+    sketchStep = "gap flank A"
+    ReDim ptsRight(0 To n * 3 - 1)
+    For i = 0 To n - 1
+        ptsRight(i * 3) = pts(i * 3)
+        ptsRight(i * 3 + 1) = -pts(i * 3 + 1)
+        ptsRight(i * 3 + 2) = 0#
+    Next i
+    SnapGapSplineEndsToCircles ptsRight, n, ra, rr
+
+    ' Left flank of next tooth (+one pitch); root index 0, tip index n-1
+    sketchStep = "gap flank B"
+    ReDim ptsNextLeft(0 To n * 3 - 1)
+    For i = 0 To n - 1
+        RotatePoint pts(i * 3), pts(i * 3 + 1), pitch, x, y
+        ptsNextLeft(i * 3) = x
+        ptsNextLeft(i * 3 + 1) = y
+        ptsNextLeft(i * 3 + 2) = 0#
+    Next i
+    SnapGapSplineEndsToCircles ptsNextLeft, n, ra, rr
+
+    xRootA = ptsRight(0): yRootA = ptsRight(1)
+    xTipA = ptsRight((n - 1) * 3): yTipA = ptsRight((n - 1) * 3 + 1)
+    xRootB = ptsNextLeft(0): yRootB = ptsNextLeft(1)
+    xTipB = ptsNextLeft((n - 1) * 3): yTipB = ptsNextLeft((n - 1) * 3 + 1)
+
+    Set swInvoluteSpline = swSketchManager.CreateSpline(ptsRight)
+    If swInvoluteSpline Is Nothing Then GoTo SketchFail
+    Set swMirroredInvoluteSpline = swSketchManager.CreateSpline(ptsNextLeft)
+    If swMirroredInvoluteSpline Is Nothing Then GoTo SketchFail
+
+    ' Arcs use exact spline corner coords; CW on Da/Dd; high-Y end on flank A
+    sketchStep = "gap tip and root arcs"
+    If Not AddGapTipRootArcs(ra, rr, xRootA, yRootA, xRootB, yRootB, xTipA, yTipA, xTipB, yTipB) Then GoTo SketchFail
+
+    sketchStep = "coincident corners"
+    ConstrainGapSketchClosed
+
+    sketchStep = "capture sketch"
+    Set swToothGapSketchFeat = FindLastSketchFeature()
+    If swToothGapSketchFeat Is Nothing Then
+        DebugPrint "CreateToothGapSketch: could not get sketch feature"
+        GoTo SketchFail
+    End If
+
+    sketchStep = "exit sketch"
+    swSketchManager.InsertSketch True
+    ClearSWSelection
+
+    DebugPrint "CreateToothGapSketch OK (gap pitch=" & Format(pitch * 180# / Pi, "0.###") & " deg)"
+    CreateToothGapSketch = True
+    Exit Function
+
+SketchFail:
+    DebugPrint "CreateToothGapSketch FAIL (" & sketchStep & "): " & Err.Number & " " & Err.Description
+    CreateToothGapSketch = False
+End Function
+
+Private Function SelectGapSketchForCut() As Boolean
+    Dim skName As String
+    Dim docTitle As String
+
+    SelectGapSketchForCut = False
+    If swToothGapSketchFeat Is Nothing Then Set swToothGapSketchFeat = FindLastSketchFeature()
+    If swToothGapSketchFeat Is Nothing Then Exit Function
+
+    ClearSWSelection
+    skName = swToothGapSketchFeat.Name
+    On Error Resume Next
+    swToothGapSketchFeat.Select2 False, 0
+    If swSelMgr.GetSelectedObjectCount2(-1) >= 1 Then
+        SelectGapSketchForCut = True
+        Exit Function
+    End If
+    docTitle = swDoc.GetTitle
+    If docTitle <> "" Then
+        SelectGapSketchForCut = swModelDocExt.SelectByID2(skName & "@" & docTitle, "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+    End If
+    If Not SelectGapSketchForCut Then
+        SelectGapSketchForCut = swModelDocExt.SelectByID2(skName, "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+    End If
+    On Error GoTo 0
+End Function
+
+' FeatureCut4: T1=Through All, UseAutoSelect=True so the addendum blank is cut
+Private Function TryCreateGapCutFeature(ByRef methodUsed As String) As SldWorks.Feature
+    Dim lastErr As Long
+    Dim lastDesc As String
+
+    Set TryCreateGapCutFeature = Nothing
+    methodUsed = ""
+    On Error Resume Next
+
+    Err.Clear
+    Set TryCreateGapCutFeature = swFeatMgr.FeatureCut4( _
+        True, False, False, _
+        SW_END_THROUGH_ALL, SW_END_BLIND, 0#, 0#, _
+        False, False, False, False, _
+        0#, 0#, _
+        False, False, False, False, _
+        False, _
+        False, True, _
+        False, False, False, _
+        SW_START_SKETCH_PLANE, 0#, False, False)
+    If Not TryCreateGapCutFeature Is Nothing Then
+        methodUsed = "FeatureCut4 ThroughAll"
+        Exit Function
+    End If
+    lastErr = Err.Number: lastDesc = Err.Description: Err.Clear
+
+    Set TryCreateGapCutFeature = swFeatMgr.FeatureCut4( _
+        True, False, False, _
+        SW_END_BLIND, SW_END_BLIND, GearGeom.WidthM, 0#, _
+        False, False, False, False, _
+        0#, 0#, _
+        False, False, False, False, _
+        False, _
+        False, True, _
+        False, False, False, _
+        SW_START_SKETCH_PLANE, 0#, False, False)
+    If Not TryCreateGapCutFeature Is Nothing Then
+        methodUsed = "FeatureCut4 Blind depth"
+        Exit Function
+    End If
+    lastErr = Err.Number: lastDesc = Err.Description: Err.Clear
+
+    ' Reverse cut direction (same 27-arg FeatureCut4 API)
+    Set TryCreateGapCutFeature = swFeatMgr.FeatureCut4( _
+        True, False, True, _
+        SW_END_THROUGH_ALL, SW_END_BLIND, 0#, 0#, _
+        False, False, False, False, _
+        0#, 0#, _
+        False, False, False, False, _
+        False, _
+        False, True, _
+        False, False, False, _
+        SW_START_SKETCH_PLANE, 0#, False, False)
+    If Not TryCreateGapCutFeature Is Nothing Then
+        methodUsed = "FeatureCut4 ThroughAll (Dir reversed)"
+        Exit Function
+    End If
+    lastErr = Err.Number: lastDesc = Err.Description
+
+    DebugPrint "TryCreateGapCutFeature FeatureCut4 failed: " & lastErr & " " & lastDesc
+    On Error GoTo 0
+End Function
+
+' ---------------------------------------------------------------------------
+' 8. CutExtrudeToothGap - through-all cut in addendum blank
+' ---------------------------------------------------------------------------
+Public Function CutExtrudeToothGap() As Boolean
+    On Error GoTo CutFail
+    Dim methodUsed As String
+    Dim selCount As Long
+
+    If swToothGapSketchFeat Is Nothing Then Set swToothGapSketchFeat = FindLastSketchFeature()
+    If swToothGapSketchFeat Is Nothing Then
+        DebugPrint "CutExtrudeToothGap: no gap sketch feature"
+        GoTo CutFail
+    End If
+
+    RebuildSWPart
+    If Not SelectGapSketchForCut() Then
+        DebugPrint "CutExtrudeToothGap: sketch select failed (" & swToothGapSketchFeat.Name & ")"
+        GoTo CutFail
+    End If
+
+    selCount = swSelMgr.GetSelectedObjectCount2(-1)
+    DebugPrint "CutExtrudeToothGap: sketch selected, count=" & selCount
+
+    Set swToothCutFeat = TryCreateGapCutFeature(methodUsed)
+    If swToothCutFeat Is Nothing Then GoTo CutFail
+
+    DebugPrint "Tooth gap cut feature: " & swToothCutFeat.Name & " (" & methodUsed & ")"
+    ClearSWSelection
+    RebuildSWPart
+    DebugPrint "CutExtrudeToothGap OK (through all)"
+    CutExtrudeToothGap = True
+    Exit Function
+
+CutFail:
+    DebugPrint "CutExtrudeToothGap FAIL: " & Err.Number & " " & Err.Description
+    CutExtrudeToothGap = False
+End Function
+
+Private Function FindFeatureByNameSafe(ByVal featName As String) As SldWorks.Feature
+    On Error Resume Next
+    Set FindFeatureByNameSafe = swPart.FeatureByName(featName)
+    On Error GoTo 0
+End Function
+
+' Body2.Select2(append, mark) fails compile on some SW VBA builds; use Select4 or one-arg Select2
+Private Function SelectSolidBodyForCombine(ByVal swBody As SldWorks.Body2, ByVal append As Boolean) As Boolean
+    Dim sd As SldWorks.SelectData
+    On Error Resume Next
+    SelectSolidBodyForCombine = False
+    Set sd = swSelMgr.CreateSelectData
+    If Not sd Is Nothing Then
+        sd.Mark = 0
+        SelectSolidBodyForCombine = swBody.Select4(append, sd)
+        If SelectSolidBodyForCombine Then Exit Function
+    End If
+    Err.Clear
+    SelectSolidBodyForCombine = swBody.Select2(append)
+    On Error GoTo 0
+End Function
+
+Private Function SelectForCirPatternMark(ByVal swObj As Object, ByVal mark As Long, ByVal append As Boolean) As Boolean
+    Dim sd As SldWorks.SelectData
+    On Error Resume Next
+    Set sd = swSelMgr.CreateSelectData
+    If Not sd Is Nothing Then
+        sd.Mark = mark
+        SelectForCirPatternMark = swObj.Select4(append, sd)
+    End If
+    If Not SelectForCirPatternMark Then
+        SelectForCirPatternMark = swObj.Select2(append, mark)
+    End If
+    On Error GoTo 0
+End Function
+
+' SW doc: mark 4 = features to pattern, mark 1 = axis; feature selected FIRST
+Private Function PreselectCircularPattern(ByRef stepDetail As String) As Boolean
+    Dim toothName As String
+    Dim axisName As String
+    Dim toothOk As Boolean
+    Dim axisOk As Boolean
+
+    PreselectCircularPattern = False
+    stepDetail = "clear"
+    ClearSWSelection
+
+    toothName = swToothCutFeat.Name
+    axisName = mAxisName
+    If axisName = "" And Not swGearAxisFeat Is Nothing Then axisName = swGearAxisFeat.Name
+
+    stepDetail = "tooth BODYFEATURE mark4"
+    toothOk = swModelDocExt.SelectByID2(toothName, "BODYFEATURE", 0, 0, 0, False, 4, Nothing, 0)
+    If Not toothOk Then toothOk = SelectForCirPatternMark(swToothCutFeat, 4, False)
+    If Not toothOk Then
+        DebugPrint "Preselect: tooth failed for " & toothName
+        Exit Function
+    End If
+
+    stepDetail = "axis mark1"
+    axisOk = False
+    If axisName <> "" Then
+        axisOk = swModelDocExt.SelectByID2(axisName, "AXIS", 0, 0, 0, True, 1, Nothing, 0)
+        If Not axisOk Then axisOk = swModelDocExt.SelectByID2(axisName, "REFAXIS", 0, 0, 0, True, 1, Nothing, 0)
+        If Not axisOk Then axisOk = swModelDocExt.SelectByID2(axisName, "RefAxis", 0, 0, 0, True, 1, Nothing, 0)
+        If Not axisOk Then axisOk = SelectAxisByNameWithDocSuffix(axisName)
+    End If
+    If Not axisOk And Not swGearAxisFeat Is Nothing Then
+        axisOk = SelectForCirPatternMark(swGearAxisFeat, 1, True)
+    End If
+    If Not axisOk Then
+        DebugPrint "Preselect: axis failed for " & axisName
+        Exit Function
+    End If
+
+    PreselectCircularPattern = True
+End Function
+
+Private Function SelectAxisByNameWithDocSuffix(ByVal axisName As String) As Boolean
+    Dim docTitle As String
+    Dim fullName As String
+
+    On Error Resume Next
+    docTitle = swDoc.GetTitle
+    If docTitle = "" Then Exit Function
+    fullName = axisName & "@" & docTitle
+    SelectAxisByNameWithDocSuffix = swModelDocExt.SelectByID2(fullName, "AXIS", 0, 0, 0, True, 1, Nothing, 0)
+    If Not SelectAxisByNameWithDocSuffix Then
+        SelectAxisByNameWithDocSuffix = swModelDocExt.SelectByID2(fullName, "REFAXIS", 0, 0, 0, True, 1, Nothing, 0)
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function CreateCircularPatternFromSelection(ByRef stepDetail As String) As Boolean
+    Dim swFeatData As Object
+    If Not PreselectCircularPattern(stepDetail) Then Exit Function
+    Set swFeatData = swFeatMgr.CreateDefinition(swFeatureNameID_e.swFmCirPattern)
+    If swFeatData Is Nothing Then Exit Function
+    swFeatData.BodyPattern = False
+    swFeatData.GeometryPattern = False
+    swFeatData.EqualSpacing = True
+    swFeatData.ReverseDirection = False
+    swFeatData.Spacing = 2# * Pi
+    swFeatData.TotalInstances = GearGeom.NumTeeth
+    swFeatData.Direction2 = False
+    swFeatData.VarySketch = False
+    Set swPatternFeat = swFeatMgr.CreateFeature(swFeatData)
+    CreateCircularPatternFromSelection = Not (swPatternFeat Is Nothing)
+End Function
+
+' ---------------------------------------------------------------------------
+' 9. CircularPatternTooth - pattern the cut-extrude (tooth gap), not the blank boss
+' ---------------------------------------------------------------------------
+Public Function CircularPatternTooth() As Boolean
+    On Error GoTo PatternFail
+    Dim swFeatData As Object
+    Dim featArr(0) As Object
+    Dim vFeatArr As Variant
+    Dim stepDetail As String
+    Dim toothName As String
+    Dim axisName As String
+
+    stepDetail = "resolve refs"
+    If swGearAxisFeat Is Nothing Then Set swGearAxisFeat = FindLastRefAxisFeature()
+    If swGearAxisFeat Is Nothing And mAxisName <> "" Then Set swGearAxisFeat = FindFeatureByNameSafe(mAxisName)
+    If swToothCutFeat Is Nothing Then
+        Set swToothCutFeat = FindFeatureByNameSafe("Cut-Extrude1")
+        If swToothCutFeat Is Nothing Then Set swToothCutFeat = FindFeatureByNameSafe("Boss-Extrude2")
+    End If
+    If swToothCutFeat Is Nothing Or swGearAxisFeat Is Nothing Then
+        DebugPrint "CircularPatternTooth: missing axis or tooth gap cut"
+        GoTo PatternFail
+    End If
+
+    toothName = swToothCutFeat.Name
+    axisName = mAxisName
+    If axisName = "" Then axisName = swGearAxisFeat.Name
+    DebugPrint "Pattern seed=" & toothName & " axis=" & axisName
+
+    ' Method 1: SelectByID2 BODYFEATURE + AXIS (correct order) then CreateFeature
+    stepDetail = "select BODYFEATURE+AXIS"
+    If CreateCircularPatternFromSelection(stepDetail) Then GoTo PatternOk
+
+    ' Method 2: FeatureCircularPattern4 (legacy API, selection must be active)
+    stepDetail = "FeatureCircularPattern4"
+    ClearSWSelection
+    If PreselectCircularPattern(stepDetail) Then
+        On Error Resume Next
+        Set swPatternFeat = swFeatMgr.FeatureCircularPattern4(GearGeom.NumTeeth, 2# * Pi, True, "NULL", False, False, True)
+        On Error GoTo PatternFail
+        If Not swPatternFeat Is Nothing Then GoTo PatternOk
+    End If
+
+    ' Method 3: select edge on axis (some SW versions require edge not AXIS entity)
+    stepDetail = "axis edge"
+    ClearSWSelection
+    If swModelDocExt.SelectByID2(toothName, "BODYFEATURE", 0, 0, 0, False, 4, Nothing, 0) Then
+        If swModelDocExt.SelectByID2(axisName, "EDGE", 0, 0, 0, True, 1, Nothing, 0) Then
+            Set swFeatData = swFeatMgr.CreateDefinition(swFeatureNameID_e.swFmCirPattern)
+            If Not swFeatData Is Nothing Then
+                swFeatData.BodyPattern = False
+                swFeatData.EqualSpacing = True
+                swFeatData.Spacing = 2# * Pi
+                swFeatData.TotalInstances = GearGeom.NumTeeth
+                Set swPatternFeat = swFeatMgr.CreateFeature(swFeatData)
+                If Not swPatternFeat Is Nothing Then GoTo PatternOk
+            End If
+        End If
+    End If
+
+    ' Method 4: FeaturesToPattern + Axis on feature data (no selection)
+    stepDetail = "FeaturesToPattern property"
+    Set swFeatData = swFeatMgr.CreateDefinition(swFeatureNameID_e.swFmCirPattern)
+    If Not swFeatData Is Nothing Then
+        swFeatData.BodyPattern = False
+        swFeatData.GeometryPattern = False
+        swFeatData.EqualSpacing = True
+        swFeatData.ReverseDirection = False
+        swFeatData.Spacing = 2# * Pi
+        swFeatData.TotalInstances = GearGeom.NumTeeth
+        swFeatData.Direction2 = False
+        swFeatData.VarySketch = False
+        On Error Resume Next
+        Set featArr(0) = swToothCutFeat
+        vFeatArr = featArr
+        swFeatData.FeaturesToPattern = vFeatArr
+        Set swFeatData.Axis = swGearAxisFeat
+        Set swPatternFeat = swFeatMgr.CreateFeature(swFeatData)
+        On Error GoTo PatternFail
+        If Not swPatternFeat Is Nothing Then GoTo PatternOk
+        DebugPrint "FeaturesToPattern CreateFeature failed: " & Err.Number & " " & Err.Description
+        Err.Clear
+    End If
+
+    GoTo PatternFail
+
+PatternOk:
+    ClearSWSelection
+    RebuildSWPart
+    DebugPrint "CircularPatternTooth OK (instances=" & GearGeom.NumTeeth & ", " & swPatternFeat.Name & ")"
+    CircularPatternTooth = True
+    Exit Function
+
+PatternFail:
+    DebugPrint "CircularPatternTooth FAIL (" & stepDetail & "): " & Err.Number & " " & Err.Description
+    CircularPatternTooth = False
+End Function
+
+' ---------------------------------------------------------------------------
+' 10. CombineGearBodies - union leftover solids (not a Cut-Extrude; skip if already one body)
+' ---------------------------------------------------------------------------
+Public Function CombineGearBodies() As Boolean
+    On Error GoTo CombineDone
+
+    Const swCombineAdd As Long = 0   ' swCombineBodiesOperationType_e.swCombineOperationType_Add
+
+    Dim vBodies As Variant
+    Dim swBody As SldWorks.Body2
+    Dim i As Long
+    Dim bodyCount As Long
+    Dim appendSel As Boolean
+
+    CombineGearBodies = True
+    RebuildSWPart
+    vBodies = swPart.GetBodies2(swSolidBody, False)
+    If IsEmpty(vBodies) Then
+        DebugPrint "CombineGearBodies: no solid bodies"
+        CombineGearBodies = False
+        Exit Function
+    End If
+
+    If IsArray(vBodies) Then
+        bodyCount = UBound(vBodies) - LBound(vBodies) + 1
+    Else
+        bodyCount = 1
+    End If
+
+    DebugPrint "CombineGearBodies: body count=" & bodyCount
+    If bodyCount < 2 Then
+        DebugPrint "CombineGearBodies: skipped (single solid already merged)"
+        Exit Function
+    End If
+
+    ClearSWSelection
+    For i = LBound(vBodies) To UBound(vBodies)
+        Set swBody = vBodies(i)
+        appendSel = (i > LBound(vBodies))
+        If Not SelectSolidBodyForCombine(swBody, appendSel) Then
+            DebugPrint "CombineGearBodies: could not select body index " & i
+            GoTo CombineDone
+        End If
+    Next i
+
+    Set swCombineFeat = swFeatMgr.InsertCombineFeature(swCombineAdd, Nothing, False)
+    If swCombineFeat Is Nothing Then
+        DebugPrint "CombineGearBodies: InsertCombineFeature returned Nothing"
+        GoTo CombineDone
+    End If
+
+    ClearSWSelection
+    RebuildSWPart
+    DebugPrint "CombineGearBodies OK (" & swCombineFeat.Name & ")"
+    CombineGearBodies = True
+    Exit Function
+
+CombineDone:
+    DebugPrint "CombineGearBodies skipped or failed: " & Err.Number & " " & Err.Description
+    ClearSWSelection
+    CombineGearBodies = False
+End Function
+
+' ---------------------------------------------------------------------------
+' 11. RebuildAndValidate
+' ---------------------------------------------------------------------------
+Public Function RebuildAndValidate() As Boolean
+    On Error GoTo ValFail
+    Dim vBodies As Variant
+    Dim bodyCount As Long
+    Dim feat As SldWorks.Feature
+    Dim failed As Boolean
+    Dim errCount As Long
+
+    RebuildSWPart
+    failed = False
+    errCount = 0
+
+    Set feat = swPart.FirstFeature
+    Do While Not feat Is Nothing
+        If feat.IsSuppressed = False Then
+            If feat.GetErrorCode2(True) <> 0 Then
+                errCount = errCount + 1
+                DebugPrint "Feature error: " & feat.Name & " code=" & feat.GetErrorCode2(True)
+                failed = True
+            End If
+        End If
+        Set feat = feat.GetNextFeature
+    Loop
+
+    vBodies = swPart.GetBodies2(swSolidBody, False)
+    If IsEmpty(vBodies) Then
+        bodyCount = 0
+        failed = True
+    ElseIf IsArray(vBodies) Then
+        bodyCount = UBound(vBodies) - LBound(vBodies) + 1
+    Else
+        bodyCount = 1
+    End If
+
+    DebugPrint "RebuildAndValidate: bodies=" & bodyCount & ", feature errors=" & errCount
+
+    If bodyCount < 1 Then failed = True
+    If failed Then
+        RebuildAndValidate = False
+        MsgBox "Gear rebuild reported problems. Bodies=" & bodyCount & ", feature errors=" & errCount & vbCrLf & _
+            "See Immediate Window (Ctrl+G) for debug log.", vbExclamation, "Gear Validation"
+    Else
+        RebuildAndValidate = True
+    End If
+    Exit Function
+
+ValFail:
+    DebugPrint "RebuildAndValidate FAIL: " & Err.Description
+    RebuildAndValidate = False
+End Function
+
+' --- Optional debug entry points (do not run from SolidWorks macro list for normal use) ---
+' Normal flow: UserForm1 -> cbGenerate -> GenerateGear (creates NewPart automatically)
+
+Public Sub Test_CalculateOnly()
+    If ReadGearInputsFromForm() Then
+        MsgBox "Pitch dia = " & GearGeom.PitchDiameterMM & " mm", vbInformation
+    End If
+End Sub
+
+Public Sub Test_AddendumBlankOnly()
+    ' Debug: axis + addendum disk only
+    If Not ReadGearInputsFromForm() Then Exit Sub
+    Set swApp = Application.SldWorks
+    Set swDoc = swApp.NewPart
+    If swDoc Is Nothing Then
+        MsgBox "Could not create a new part document.", vbCritical
+        Exit Sub
+    End If
+    Set swPart = swDoc
+    Set swModelDocExt = swDoc.Extension
+    Set swSketchManager = swPart.SketchManager
+    Set swFeatMgr = swDoc.FeatureManager
+    Set swSelMgr = swDoc.SelectionManager
+    Pi = 3.14159265358979
+    DebugLog = ""
+    CreateOrResetPart
+    CreateAddendumBlank
+    RebuildAndValidate
+End Sub

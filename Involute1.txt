@@ -1,0 +1,146 @@
+Option Explicit
+
+' SolidWorks application and document references
+Public swApp As SldWorks.SldWorks
+Public swDoc As SldWorks.ModelDoc2
+Public swPart As SldWorks.PartDoc
+Public swModelDocExt As SldWorks.ModelDocExtension
+Public swFeatMgr As SldWorks.FeatureManager
+Public swFeat As SldWorks.Feature
+Public swSelMgr As SldWorks.SelectionMgr
+Public swSketchManager As SldWorks.SketchManager
+Public sw2DSketch As SldWorks.Sketch
+Public swSelData As SldWorks.SelectData
+
+' Calculated gear geometry (inputs in mm; radii/diameters also stored in meters for API)
+Public Type GearGeometry
+    PressureAngleDeg As Double
+    ModuleMM As Double
+    NumTeeth As Long
+    WidthMM As Double
+    PitchDiameterMM As Double
+    PitchRadiusMM As Double
+    BaseDiameterMM As Double
+    BaseRadiusMM As Double
+    AddendumDiameterMM As Double
+    AddendumRadiusMM As Double
+    DedendumDiameterMM As Double
+    DedendumRadiusMM As Double
+    CircularPitchMM As Double
+    ToothThicknessPitchMM As Double
+    AngularPitchDeg As Double
+    AngularPitchRad As Double
+    HalfToothAngleDeg As Double
+    HalfToothAngleRad As Double
+    InvoluteTStart As Double
+    InvoluteTEnd As Double
+    InvoluteTPitch As Double
+    PitchRadiusM As Double
+    BaseRadiusM As Double
+    AddendumRadiusM As Double
+    DedendumRadiusM As Double
+    WidthM As Double
+    BaseLargerThanRoot As Boolean
+End Type
+
+Public GearGeom As GearGeometry
+Public Const MM_PER_M As Double = 1000#
+Public Const INVOLUTE_POINT_COUNT As Long = 32
+
+' Stored feature / sketch references (no hardcoded Sketch1 / Spline1 names)
+Public swFrontPlaneFeat As SldWorks.Feature
+Public swGearAxisFeat As SldWorks.Feature
+Public swAddendumExtrudeFeat As SldWorks.Feature
+Public swToothGapSketchFeat As SldWorks.Feature
+Public swToothCutFeat As SldWorks.Feature
+Public swPatternFeat As SldWorks.Feature
+Public swCombineFeat As SldWorks.Feature
+
+Public swToothSketch As SldWorks.Sketch
+Public swInvoluteSpline As SketchSegment
+Public swMirroredInvoluteSpline As SketchSegment
+Public swTipLandArc As SketchSegment
+Public swRootArc As SketchSegment
+
+Public Pi As Double
+Public boolstatus As Boolean
+
+Sub main()
+    On Error GoTo ErrorHandler
+    Load UserForm1
+    UserForm1.Show
+    Exit Sub
+ErrorHandler:
+    MsgBox "Error loading UserForm1:" & vbCrLf & Err.Number & " - " & Err.Description, vbCritical, "Form Error"
+End Sub
+
+' Orchestrator: root cylinder -> tooth sketch -> extrude -> pattern -> combine -> validate
+Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer, Width As Double)
+    On Error GoTo GenFail
+
+    Set swApp = Application.SldWorks
+    If swApp Is Nothing Then
+        MsgBox "SolidWorks is not running.", vbCritical
+        Exit Sub
+    End If
+
+    GearGeom.PressureAngleDeg = PressureAngle
+    GearGeom.ModuleMM = Module
+    GearGeom.NumTeeth = NumTeeth
+    GearGeom.WidthMM = Width
+
+    If Not ValidateGearInputsPublic(GearGeom.PressureAngleDeg, GearGeom.ModuleMM, GearGeom.NumTeeth, GearGeom.WidthMM) Then
+        Exit Sub
+    End If
+
+    CalculateGearGeometry
+
+    Set swDoc = swApp.NewPart
+    If swDoc Is Nothing Then
+        MsgBox "Could not create a new part document.", vbCritical
+        Exit Sub
+    End If
+
+    ' Ensure new part is active (SelectByID2 / sketch ops fail on inactive docs)
+    Dim activateErr As Long
+    Dim docTitle As String
+    docTitle = swDoc.GetTitle
+    On Error Resume Next
+    swApp.ActivateDoc3 docTitle, True, 0, activateErr
+    If activateErr <> 0 Then swApp.ActivateDoc2 docTitle, False, 0
+    swDoc.Visible = True
+    On Error GoTo GenFail
+
+    Set swPart = swDoc
+    Set swModelDocExt = swDoc.Extension
+    Set swSketchManager = swPart.SketchManager
+    Set swFeatMgr = swDoc.FeatureManager
+    Set swSelMgr = swDoc.SelectionManager
+    Pi = 3.14159265358979
+
+    swModelDocExt.SetUserPreferenceInteger swUserPreferenceIntegerValue_e.swUnitsLinear, _
+        swUserPreferenceOption_e.swDetailingNoOptionSpecified, swMM
+    swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swInputDimValOnCreate, False
+
+    DebugLog = ""
+    DebugPrint "=== GenerateGear start (blank+cut+pattern) z=" & GearGeom.NumTeeth & " m=" & GearGeom.ModuleMM & " ==="
+
+    ' Addendum disk boss, cut one tooth-gap, circular pattern the cut
+    If Not CreateOrResetPart() Then GoTo GenFail
+    If Not CreateAddendumBlank() Then GoTo GenFail
+    If Not CreateToothGapSketch() Then GoTo GenFail
+    If Not CutExtrudeToothGap() Then GoTo GenFail
+    If Not CircularPatternTooth() Then GoTo GenFail
+    If Not RebuildAndValidate() Then GoTo GenFail
+
+    swDoc.ViewZoomtofit2
+    swDoc.ClearSelection2 True
+    DebugPrint "=== GenerateGear completed successfully ==="
+    Exit Sub
+
+GenFail:
+    DebugPrint "=== GenerateGear FAILED: " & Err.Description & " ==="
+    If Err.Number <> 0 Then
+        MsgBox "Gear generation failed:" & vbCrLf & Err.Description, vbCritical, "Gear Macro"
+    End If
+End Sub
