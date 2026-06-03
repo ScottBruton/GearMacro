@@ -12,6 +12,22 @@ Private Const SW_END_BLIND As Long = 0
 Private Const SW_END_THROUGH_ALL As Long = 1
 Private Const SW_START_SKETCH_PLANE As Long = 0
 
+' Gear train metadata (custom properties + named sketch dimensions)
+Public Const GEAR_DIM_ADDENDUM_RADIUS As String = "InvoluteGear_Da_Radius"
+Public Const GEAR_DIM_DEDENDUM_RADIUS As String = "InvoluteGear_Dd_Radius"
+Public Const GEAR_DIM_MODULE As String = "InvoluteGear_Module"
+Public Const GEAR_DIM_NUM_TEETH As String = "InvoluteGear_NumTeeth"
+Public Const GEAR_DIM_PRESSURE_ANGLE As String = "InvoluteGear_PressureAngle"
+Public Const GEAR_DIM_WIDTH As String = "InvoluteGear_Width"
+Public Const GEAR_DIM_PITCH_DIAMETER As String = "InvoluteGear_PitchDiameter"
+
+Public Const GEAR_PROP_MODULE As String = "InvoluteGear_Module"
+Public Const GEAR_PROP_TEETH As String = "InvoluteGear_Teeth"
+Public Const GEAR_PROP_PRESSURE As String = "InvoluteGear_PressureAngle"
+Public Const GEAR_PROP_WIDTH As String = "InvoluteGear_Width"
+Public Const GEAR_PROP_PITCH_DIA As String = "InvoluteGear_PitchDiameter"
+Public Const GEAR_PROP_ADDENDUM_DIA As String = "InvoluteGear_AddendumDiameter"
+
 Public Sub DebugPrint(ByVal msg As String)
     Debug.Print msg
     DebugLog = DebugLog & msg & vbCrLf
@@ -1115,24 +1131,6 @@ ValFail:
     DebugPrint "RebuildAndValidate FAIL: " & Err.Description
     RebuildAndValidate = False
 End Function
-
-' ---------------------------------------------------------------------------
-' Gear train metadata (custom properties + named sketch dimensions)
-' ---------------------------------------------------------------------------
-Public Const GEAR_DIM_ADDENDUM_RADIUS As String = "InvoluteGear_Da_Radius"
-Public Const GEAR_DIM_DEDENDUM_RADIUS As String = "InvoluteGear_Dd_Radius"
-Public Const GEAR_DIM_MODULE As String = "InvoluteGear_Module"
-Public Const GEAR_DIM_NUM_TEETH As String = "InvoluteGear_NumTeeth"
-Public Const GEAR_DIM_PRESSURE_ANGLE As String = "InvoluteGear_PressureAngle"
-Public Const GEAR_DIM_WIDTH As String = "InvoluteGear_Width"
-Public Const GEAR_DIM_PITCH_DIAMETER As String = "InvoluteGear_PitchDiameter"
-
-Public Const GEAR_PROP_MODULE As String = "InvoluteGear_Module"
-Public Const GEAR_PROP_TEETH As String = "InvoluteGear_Teeth"
-Public Const GEAR_PROP_PRESSURE As String = "InvoluteGear_PressureAngle"
-Public Const GEAR_PROP_WIDTH As String = "InvoluteGear_Width"
-Public Const GEAR_PROP_PITCH_DIA As String = "InvoluteGear_PitchDiameter"
-Public Const GEAR_PROP_ADDENDUM_DIA As String = "InvoluteGear_AddendumDiameter"
 
 Public Function CenterDistanceMM(ByVal moduleMM As Double, ByVal z1 As Long, ByVal z2 As Long) As Double
     CenterDistanceMM = moduleMM * (CDbl(z1) + CDbl(z2)) / 2#
