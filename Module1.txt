@@ -796,6 +796,7 @@ Public Function CreateAddendumBlank() As Boolean
     On Error GoTo BlankFail
     Dim swCircle As SketchSegment
     Dim rM As Double
+    Dim mergeBoss As Boolean
 
     rM = GearGeom.AddendumRadiusM
     ExitActiveSketchIfAny
@@ -814,15 +815,22 @@ Public Function CreateAddendumBlank() As Boolean
     ConstrainGearCenterToOrigin swCircle
 
     swSketchManager.InsertSketch True
+    mergeBoss = Not PartNeedsCutFeatureScope()
+
     Set swAddendumExtrudeFeat = swFeatMgr.FeatureExtrusion3(True, False, False, 0, 0, GearGeom.WidthM, 0#, _
-        False, False, False, False, 0, 0, False, False, False, False, True, False, False, 0, 0, False)
+        False, False, False, False, 0, 0, False, False, False, False, mergeBoss, False, False, 0, 0, False)
 
     If swAddendumExtrudeFeat Is Nothing Then GoTo BlankFail
     DebugPrint "Addendum blank feature: " & swAddendumExtrudeFeat.Name
 
+    If PartNeedsCutFeatureScope() Then
+        SetBossExtrudeNoMerge swAddendumExtrudeFeat
+    End If
+
     ClearSWSelection
     RebuildSWPart
-    DebugPrint "CreateAddendumBlank OK (Da/2=" & Format(GearGeom.AddendumRadiusMM, "0.###") & " mm)"
+    DebugPrint "CreateAddendumBlank OK (Da/2=" & Format(GearGeom.AddendumRadiusMM, "0.###") & " mm" & _
+        IIf(PartNeedsCutFeatureScope(), ", separate body)", ")")
 
     If GearTrainRole = GEAR_ROLE_DRIVEN Then
         If mDrivenPatternUsesBossFace Or swGearAxisFeat Is Nothing Then
@@ -1144,13 +1152,163 @@ Private Function SelectGapSketchForCut() As Boolean
     On Error GoTo 0
 End Function
 
-' FeatureCut4: T1=Through All, UseAutoSelect=True so the addendum blank is cut
+Private Function SelectGapSketchForCutAppend() As Boolean
+    Dim skName As String
+    Dim docTitle As String
+
+    SelectGapSketchForCutAppend = False
+    If swToothGapSketchFeat Is Nothing Then Exit Function
+    skName = swToothGapSketchFeat.Name
+    On Error Resume Next
+    swToothGapSketchFeat.Select2 True, 0
+    If swSelMgr.GetSelectedObjectCount2(-1) >= 1 Then
+        SelectGapSketchForCutAppend = True
+        Exit Function
+    End If
+    docTitle = swDoc.GetTitle
+    If docTitle <> "" Then
+        SelectGapSketchForCutAppend = swModelDocExt.SelectByID2(skName & "@" & docTitle, "SKETCH", 0#, 0#, 0#, True, 0, Nothing, 0)
+    End If
+    If Not SelectGapSketchForCutAppend Then
+        SelectGapSketchForCutAppend = swModelDocExt.SelectByID2(skName, "SKETCH", 0#, 0#, 0#, True, 0, Nothing, 0)
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function PartNeedsCutFeatureScope() As Boolean
+    PartNeedsCutFeatureScope = (mGearSolidBodyCountBefore > 0)
+End Function
+
+' Solid body from the current addendum boss (Face2.GetBody — reliable; GetBodies2 order is not creation order)
+Private Function GetCurrentGearSolidBody() As SldWorks.Body2
+    Dim swFace As SldWorks.Face2
+    Dim vBodies As Variant
+    Dim idx As Long
+
+    On Error Resume Next
+    If Not swAddendumExtrudeFeat Is Nothing Then
+        Set swFace = FindAddendumCylindricalFace()
+        If Not swFace Is Nothing Then
+            Set GetCurrentGearSolidBody = swFace.GetBody
+            If Not GetCurrentGearSolidBody Is Nothing Then Exit Function
+        End If
+    End If
+
+    If swPart Is Nothing Then Exit Function
+    vBodies = swPart.GetBodies2(swSolidBody, False)
+    If Not IsArray(vBodies) Then Exit Function
+    idx = UBound(vBodies)
+    Set GetCurrentGearSolidBody = vBodies(idx)
+    On Error GoTo 0
+End Function
+
+' Select solid body with feature-scope mark (mark 8 = bodies to affect in cut extrude)
+Private Function SelectSolidBodyWithMark(ByVal swBody As SldWorks.Body2, ByVal append As Boolean, ByVal mark As Long) As Boolean
+    Dim sd As SldWorks.SelectData
+    Dim bodyName As String
+
+    On Error Resume Next
+    SelectSolidBodyWithMark = False
+    If swBody Is Nothing Then Exit Function
+    Set sd = swSelMgr.CreateSelectData
+    If Not sd Is Nothing Then
+        sd.Mark = mark
+        SelectSolidBodyWithMark = swBody.Select4(append, sd)
+        If SelectSolidBodyWithMark Then Exit Function
+    End If
+    bodyName = Trim$(swBody.Name)
+    If bodyName <> "" Then
+        SelectSolidBodyWithMark = swModelDocExt.SelectByID2(bodyName, "SOLIDBODY", 0#, 0#, 0#, append, mark, Nothing, 0)
+    End If
+    On Error GoTo 0
+End Function
+
+' Multibody part: scope cut to the gear blank only (not the mating driving gear)
+Private Function SelectCurrentGearBodyForCutScope() As Boolean
+    Dim swBody As SldWorks.Body2
+
+    SelectCurrentGearBodyForCutScope = False
+    Set swBody = GetCurrentGearSolidBody()
+    If swBody Is Nothing Then Exit Function
+
+    SelectCurrentGearBodyForCutScope = SelectSolidBodyWithMark(swBody, True, 8)
+    If SelectCurrentGearBodyForCutScope Then
+        DebugPrint "SelectCurrentGearBodyForCutScope OK: " & BodyDisplayName(swBody, 0)
+    End If
+End Function
+
+Private Function SetBossExtrudeNoMerge(ByVal swBossFeat As SldWorks.Feature) As Boolean
+    Dim swDef As Object
+
+    SetBossExtrudeNoMerge = False
+    If swBossFeat Is Nothing Then Exit Function
+
+    On Error Resume Next
+    Set swDef = swBossFeat.GetDefinition
+    If swDef Is Nothing Then Exit Function
+    If Not swDef.AccessSelections(swPart, Nothing) Then Exit Function
+    swDef.Merge = False
+    swDef.MergeResult = False
+    SetBossExtrudeNoMerge = swBossFeat.ModifyDefinition(swDef, swPart, Nothing)
+    swDef.ReleaseSelectionAccess
+    If SetBossExtrudeNoMerge Then
+        DebugPrint "SetBossExtrudeNoMerge OK (" & swBossFeat.Name & ")"
+    Else
+        DebugPrint "SetBossExtrudeNoMerge failed: " & Err.Number & " " & Err.Description
+        Err.Clear
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function SetCutFeatureScopeToCurrentGearBody(ByVal swCutFeat As SldWorks.Feature) As Boolean
+    Dim swDef As Object
+    Dim swBody As SldWorks.Body2
+    Dim bodyArr(0) As Object
+    Dim vBodies As Variant
+
+    SetCutFeatureScopeToCurrentGearBody = False
+    If swCutFeat Is Nothing Then Exit Function
+    Set swBody = GetCurrentGearSolidBody()
+    If swBody Is Nothing Then Exit Function
+
+    On Error Resume Next
+    Set swDef = swCutFeat.GetDefinition
+    If swDef Is Nothing Then Exit Function
+    If Not swDef.AccessSelections(swPart, Nothing) Then Exit Function
+    On Error Resume Next
+    swDef.FeatureScope = True
+    swDef.AutoSelect = False
+    bodyArr(0) = swBody
+    vBodies = bodyArr
+    swDef.FeatureScopeBodies = vBodies
+    If Err.Number <> 0 Then
+        Err.Clear
+        swDef.Bodies = vBodies
+    End If
+    SetCutFeatureScopeToCurrentGearBody = swCutFeat.ModifyDefinition(swDef, swPart, Nothing)
+    swDef.ReleaseSelectionAccess
+    If SetCutFeatureScopeToCurrentGearBody Then
+        DebugPrint "SetCutFeatureScopeToCurrentGearBody OK"
+    Else
+        DebugPrint "SetCutFeatureScopeToCurrentGearBody failed: " & Err.Number & " " & Err.Description
+        Err.Clear
+    End If
+    On Error GoTo 0
+End Function
+
+' FeatureCut4: through cut; multibody parts use feature scope on current gear body only
 Private Function TryCreateGapCutFeature(ByRef methodUsed As String) As SldWorks.Feature
     Dim lastErr As Long
     Dim lastDesc As String
+    Dim useScope As Boolean
+    Dim useFeatScope As Boolean
+    Dim useAutoSelect As Boolean
 
     Set TryCreateGapCutFeature = Nothing
     methodUsed = ""
+    useScope = PartNeedsCutFeatureScope()
+    useFeatScope = useScope
+    useAutoSelect = Not useScope
     On Error Resume Next
 
     Err.Clear
@@ -1161,7 +1319,7 @@ Private Function TryCreateGapCutFeature(ByRef methodUsed As String) As SldWorks.
         0#, 0#, _
         False, False, False, False, _
         False, _
-        False, True, _
+        useFeatScope, useAutoSelect, _
         False, False, False, _
         SW_START_SKETCH_PLANE, 0#, False, False)
     If Not TryCreateGapCutFeature Is Nothing Then
@@ -1177,7 +1335,7 @@ Private Function TryCreateGapCutFeature(ByRef methodUsed As String) As SldWorks.
         0#, 0#, _
         False, False, False, False, _
         False, _
-        False, True, _
+        useFeatScope, useAutoSelect, _
         False, False, False, _
         SW_START_SKETCH_PLANE, 0#, False, False)
     If Not TryCreateGapCutFeature Is Nothing Then
@@ -1194,14 +1352,33 @@ Private Function TryCreateGapCutFeature(ByRef methodUsed As String) As SldWorks.
         0#, 0#, _
         False, False, False, False, _
         False, _
-        False, True, _
+        useFeatScope, useAutoSelect, _
         False, False, False, _
         SW_START_SKETCH_PLANE, 0#, False, False)
     If Not TryCreateGapCutFeature Is Nothing Then
         methodUsed = "FeatureCut4 ThroughAll (Dir reversed)"
         Exit Function
     End If
-    lastErr = Err.Number: lastDesc = Err.Description
+    lastErr = Err.Number: lastDesc = Err.Description: Err.Clear
+
+    ' Multibody fallback: sketch-only + feature scope auto-intersect (tooth sketch is on driven blank only)
+    If useScope Then
+        Set TryCreateGapCutFeature = swFeatMgr.FeatureCut4( _
+            True, False, False, _
+            SW_END_THROUGH_ALL, SW_END_BLIND, 0#, 0#, _
+            False, False, False, False, _
+            0#, 0#, _
+            False, False, False, False, _
+            False, _
+            True, True, _
+            False, False, False, _
+            SW_START_SKETCH_PLANE, 0#, False, False)
+        If Not TryCreateGapCutFeature Is Nothing Then
+            methodUsed = "FeatureCut4 ThroughAll (scope auto-intersect)"
+            Exit Function
+        End If
+        lastErr = Err.Number: lastDesc = Err.Description: Err.Clear
+    End If
 
     DebugPrint "TryCreateGapCutFeature FeatureCut4 failed: " & lastErr & " " & lastDesc
     On Error GoTo 0
@@ -1227,13 +1404,28 @@ Public Function CutExtrudeToothGap() As Boolean
         GoTo CutFail
     End If
 
+    If PartNeedsCutFeatureScope() Then
+        If SelectCurrentGearBodyForCutScope() Then
+            If Not SelectGapSketchForCutAppend() Then
+                DebugPrint "CutExtrudeToothGap: warning — could not re-select sketch after body scope"
+            End If
+        Else
+            DebugPrint "CutExtrudeToothGap: warning — could not pre-select body for feature scope"
+        End If
+    End If
+
     selCount = swSelMgr.GetSelectedObjectCount2(-1)
-    DebugPrint "CutExtrudeToothGap: sketch selected, count=" & selCount
+    DebugPrint "CutExtrudeToothGap: selections before cut, count=" & selCount
 
     Set swToothCutFeat = TryCreateGapCutFeature(methodUsed)
     If swToothCutFeat Is Nothing Then GoTo CutFail
 
-    DebugPrint "Tooth gap cut feature: " & swToothCutFeat.Name & " (" & methodUsed & ")"
+    If PartNeedsCutFeatureScope() Then
+        SetCutFeatureScopeToCurrentGearBody swToothCutFeat
+    End If
+
+    DebugPrint "Tooth gap cut feature: " & swToothCutFeat.Name & " (" & methodUsed & _
+        IIf(PartNeedsCutFeatureScope(), ", scoped to current gear body)", ")")
     ClearSWSelection
     RebuildSWPart
     DebugPrint "CutExtrudeToothGap OK (through all)"
@@ -1251,20 +1443,8 @@ Private Function FindFeatureByNameSafe(ByVal featName As String) As SldWorks.Fea
     On Error GoTo 0
 End Function
 
-' Body2.Select2(append, mark) fails compile on some SW VBA builds; use Select4 or one-arg Select2
 Private Function SelectSolidBodyForCombine(ByVal swBody As SldWorks.Body2, ByVal append As Boolean) As Boolean
-    Dim sd As SldWorks.SelectData
-    On Error Resume Next
-    SelectSolidBodyForCombine = False
-    Set sd = swSelMgr.CreateSelectData
-    If Not sd Is Nothing Then
-        sd.Mark = 0
-        SelectSolidBodyForCombine = swBody.Select4(append, sd)
-        If SelectSolidBodyForCombine Then Exit Function
-    End If
-    Err.Clear
-    SelectSolidBodyForCombine = swBody.Select2(append)
-    On Error GoTo 0
+    SelectSolidBodyForCombine = SelectSolidBodyWithMark(swBody, append, 0)
 End Function
 
 Private Function SelectForCirPatternMark(ByVal swObj As Object, ByVal mark As Long, ByVal append As Boolean) As Boolean
@@ -1844,30 +2024,14 @@ Public Function IsMacroGearBody(ByVal swBody As SldWorks.Body2, ByVal swPartDoc 
 End Function
 
 Public Sub NameGearSolidBodyAfterBuild()
-    Dim vBodies As Variant
     Dim swBody As SldWorks.Body2
-    Dim i As Long
-    Dim nBodies As Long
     Dim newName As String
-    Dim idxNew As Long
 
     On Error Resume Next
     newName = BuildGearBodyName()
     If swPart Is Nothing Then Exit Sub
-    vBodies = swPart.GetBodies2(swSolidBody, False)
-    If IsEmpty(vBodies) Then Exit Sub
-    If IsArray(vBodies) Then
-        nBodies = UBound(vBodies) - LBound(vBodies) + 1
-    Else
-        nBodies = 1
-    End If
 
-    idxNew = nBodies - 1
-    If nBodies > mGearSolidBodyCountBefore Then idxNew = mGearSolidBodyCountBefore
-    If idxNew < LBound(vBodies) Then idxNew = LBound(vBodies)
-    If idxNew > UBound(vBodies) Then idxNew = UBound(vBodies)
-
-    Set swBody = vBodies(idxNew)
+    Set swBody = GetCurrentGearSolidBody()
     If swBody Is Nothing Then Exit Sub
     swBody.Name = newName
     DebugPrint "Named gear solid body: " & newName
