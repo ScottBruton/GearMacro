@@ -9,6 +9,11 @@ Private mAxisName As String
 Private mSketchOffsetXM As Double
 Private mSketchOffsetYM As Double
 Private mGearSolidBodyCountBefore As Long
+Private mUseSketchCenterlineAsAxis As Boolean
+Private mPatternAxisLineId As String
+Private mPatternAxisSketchName As String
+Private mPatternAxisSegment As SldWorks.SketchSegment
+Private mDrivenPatternUsesBossFace As Boolean
 Private Const SW_DIM_TYPE_DIAMETER As Long = 6
 Private Const SW_DIM_TYPE_RADIAL As Long = 5
 
@@ -43,20 +48,63 @@ End Sub
 Public Sub ResetGearSketchOffset()
     mSketchOffsetXM = 0#
     mSketchOffsetYM = 0#
+    mUseSketchCenterlineAsAxis = False
+    mPatternAxisLineId = ""
+    mPatternAxisSketchName = ""
+    Set mPatternAxisSegment = Nothing
+    mDrivenPatternUsesBossFace = False
+End Sub
+
+Public Function GetGearTrainLayoutCenterDistanceMM() As Double
+    If GearTrainLayoutCenterDistanceMM > 0# Then
+        GetGearTrainLayoutCenterDistanceMM = GearTrainLayoutCenterDistanceMM
+    Else
+        GetGearTrainLayoutCenterDistanceMM = GearTrainCenterDistanceMM
+    End If
+End Function
+
+' Read nominal + mfg clearance/backlash from UserForm before driven gear build
+Public Sub SyncGearTrainLayoutCenterFromForm()
+    Dim z2 As Long
+    Dim cNom As Double
+    Dim clr As Double
+    Dim bl As Double
+
+    On Error Resume Next
+    GearTrainLayoutCenterDistanceMM = 0#
+    If GearTrainRole <> GEAR_ROLE_DRIVEN Then Exit Sub
+    If GearTrainDrivingTeeth <= 0 Or GearTrainDrivingModuleMM <= 0 Then Exit Sub
+
+    z2 = CLng(UserForm1.tbTeeth.Text)
+    If z2 <= 0 Then Exit Sub
+
+    cNom = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, z2)
+    GearTrainCenterDistanceMM = cNom
+
+    clr = UserForm1.MfgClearanceMM()
+    bl = UserForm1.MfgBacklashMM()
+
+    GearTrainLayoutCenterDistanceMM = cNom + clr + bl
+    DebugPrint "Layout center distance: nominal=" & Format(cNom, "0.###") & " clr=" & Format(clr, "0.###") & _
+        " backlash=" & Format(bl, "0.###") & " -> C=" & Format(GearTrainLayoutCenterDistanceMM, "0.###") & " mm"
+    On Error GoTo 0
 End Sub
 
 Public Sub SetGearTrainSketchOffsetFromLayout()
     Dim cM As Double
     Dim aRad As Double
+    Dim cMM As Double
     If GearTrainRole <> GEAR_ROLE_DRIVEN Then
         ResetGearSketchOffset
         Exit Sub
     End If
-    cM = GearTrainCenterDistanceMM / MM_PER_M
+    cMM = GetGearTrainLayoutCenterDistanceMM()
+    cM = cMM / MM_PER_M
     aRad = GearTrainMeshAngleDeg * Pi / 180#
     mSketchOffsetXM = cM * Cos(aRad)
     mSketchOffsetYM = cM * Sin(aRad)
-    DebugPrint "Driven gear sketch center offset (m): " & Format(mSketchOffsetXM, "0.####") & ", " & Format(mSketchOffsetYM, "0.####")
+    DebugPrint "Driven gear sketch center offset (m): " & Format(mSketchOffsetXM, "0.####") & ", " & Format(mSketchOffsetYM, "0.####") & _
+        " (C=" & Format(cMM, "0.###") & " mm)"
 End Sub
 
 Public Sub CaptureSolidBodyCountBeforeGearBuild()
@@ -72,7 +120,14 @@ End Sub
 
 ' Body name: {teeth}T {pitch diameter mm}  e.g. 100T 125  (X in "XT" = tooth count, not letter X)
 Public Function BuildGearBodyName() As String
-    BuildGearBodyName = CStr(GearGeom.NumTeeth) & "T " & Format(GearGeom.PitchDiameterMM, "0.###")
+    BuildGearBodyName = CStr(GearGeom.NumTeeth) & "T " & FormatPitchDiameterForName(GearGeom.PitchDiameterMM)
+End Function
+
+Private Function FormatPitchDiameterForName(ByVal pitchDiaMM As Double) As String
+    Dim s As String
+    s = CStr(Round(pitchDiaMM, 4))
+    If Right$(s, 1) = "." Then s = Left$(s, Len(s) - 1)
+    FormatPitchDiameterForName = s
 End Function
 
 ' ---------------------------------------------------------------------------
@@ -269,6 +324,7 @@ Private Function BeginSketchOnFrontPlane() As Boolean
     Dim selCount As Long
 
     BeginSketchOnFrontPlane = False
+    ExitActiveSketchIfAny
     Set swFrontPlaneFeat = GetRefPlaneByIndex(1)
     If swFrontPlaneFeat Is Nothing Then
         DebugPrint "BeginSketchOnFrontPlane: no front RefPlane"
@@ -298,8 +354,9 @@ Private Function BeginSketchOnFrontPlane() As Boolean
 End Function
 
 Private Function CreateGearAxis() As Boolean
+    ' Driven gear: one ref axis normal to Front plane at layout centre (same direction as driving Axis1)
     If Abs(mSketchOffsetXM) > 0.0000000001 Or Abs(mSketchOffsetYM) > 0.0000000001 Then
-        CreateGearAxis = CreateGearAxisAtSketchCenter()
+        CreateGearAxis = CreateDrivenGearRefAxisAtLayoutCenter()
         Exit Function
     End If
 
@@ -367,42 +424,249 @@ AxisFail:
     CreateGearAxis = False
 End Function
 
-' Axis through front plane at driven-gear center (sketch point at layout offset)
+Private Sub ExitActiveSketchIfAny()
+    On Error Resume Next
+    If Not swSketchManager.ActiveSketch Is Nothing Then
+        swSketchManager.InsertSketch True
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Function FeatureIsRefAxis(ByVal ft As SldWorks.Feature) As Boolean
+    Dim tn As String
+    On Error Resume Next
+    FeatureIsRefAxis = False
+    If ft Is Nothing Then Exit Function
+    tn = ft.GetTypeName2
+    FeatureIsRefAxis = (tn = "RefAxis") Or (tn = "Axis") Or (InStr(1, tn, "Axis", vbTextCompare) > 0)
+    On Error GoTo 0
+End Function
+
+' Driven gear: RefAxis through layout point, normal to Front plane (parallel to driving Axis1, not in-plane line axis)
+Private Function CreateDrivenGearRefAxisAtLayoutCenter() As Boolean
+    mUseSketchCenterlineAsAxis = False
+    mPatternAxisLineId = ""
+    mPatternAxisSketchName = ""
+    Set mPatternAxisSegment = Nothing
+
+    Dim swExisting As SldWorks.Feature
+    Set swExisting = FindSecondRefAxisFeature()
+    If Not swExisting Is Nothing Then
+        Set swGearAxisFeat = swExisting
+        mAxisName = swGearAxisFeat.Name
+        CreateDrivenGearRefAxisAtLayoutCenter = True
+        DebugPrint "CreateDrivenGearRefAxisAtLayoutCenter: reuse " & mAxisName & " (2nd ref axis in tree)"
+        Exit Function
+    End If
+
+    Set swGearAxisFeat = Nothing
+    If CreateGearAxisAtSketchCenter() Then
+        CreateDrivenGearRefAxisAtLayoutCenter = True
+        Exit Function
+    End If
+
+    ' InsertAxis2 at offset point often does not add Axis2 when Axis1 exists — create axis from blank cylinder after extrude
+    mDrivenPatternUsesBossFace = True
+    mAxisName = ""
+    CreateDrivenGearRefAxisAtLayoutCenter = True
+    DebugPrint "CreateDrivenGearRefAxisAtLayoutCenter: defer axis until addendum boss (cylindrical face)"
+End Function
+
 Private Function CreateGearAxisAtSketchCenter() As Boolean
+    Dim swSkPt As SldWorks.SketchPoint
     Dim swSkFeat As SldWorks.Feature
     Dim skName As String
     Dim docTitle As String
     Dim ptName As String
+    Dim axisCountBefore As Long
+    Dim axisCountAfter As Long
 
     CreateGearAxisAtSketchCenter = False
     If swFrontPlaneFeat Is Nothing Then
-        If Not ResolveAndStoreFrontPlane() Then Exit Function
+        If Not ResolveAndStoreFrontPlane() Then
+            DebugPrint "CreateGearAxisAtSketchCenter: front plane failed"
+            Exit Function
+        End If
     End If
 
-    If Not BeginSketchOnFrontPlane() Then Exit Function
-    swSketchManager.CreatePoint mSketchOffsetXM, mSketchOffsetYM, 0#
-    swSketchManager.InsertSketch True
-
-    Set swSkFeat = FindLastSketchFeature()
-    If swSkFeat Is Nothing Then Exit Function
-    skName = swSkFeat.Name
-    docTitle = swDoc.GetTitle
-    ptName = "Point1@" & skName
-    If docTitle <> "" Then ptName = "Point1@" & skName & "@" & docTitle
-
+    axisCountBefore = CountRefAxisFeatures()
+    ExitActiveSketchIfAny
     ClearSWSelection
+
+    ' Method 1: same as driving gear — Front plane + point, axis normal to face (Z), through layout centre
     SelectPlaneFeature swFrontPlaneFeat, True
-    boolstatus = swModelDocExt.SelectByID2(ptName, "EXTSKETCHPOINT", mSketchOffsetXM, mSketchOffsetYM, 0#, True, 0, Nothing, 0)
-    If Not boolstatus Then boolstatus = swModelDocExt.SelectByID2("Point1@" & skName, "EXTSKETCHPOINT", mSketchOffsetXM, mSketchOffsetYM, 0#, True, 0, Nothing, 0)
+    boolstatus = swModelDocExt.SelectByID2("", "EXTSKETCHPOINT", mSketchOffsetXM, mSketchOffsetYM, 0#, True, 0, Nothing, 0)
     If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
-    If Not boolstatus Then Exit Function
+
+    ' Method 1b: point then plane (append)
+    If Not boolstatus Then
+        ClearSWSelection
+        boolstatus = swModelDocExt.SelectByID2("", "EXTSKETCHPOINT", mSketchOffsetXM, mSketchOffsetYM, 0#, False, 0, Nothing, 0)
+        If boolstatus Then
+            SelectPlaneFeature swFrontPlaneFeat, True
+            boolstatus = swDoc.InsertAxis2(True)
+        End If
+    End If
+
+    ' Method 2: sketch point at layout centre, then axis
+    If Not boolstatus Then
+        If BeginSketchOnFrontPlane() Then
+            Set swSkPt = swSketchManager.CreatePoint(mSketchOffsetXM, mSketchOffsetYM, 0#)
+            If Not swSkPt Is Nothing Then
+                Set swSkFeat = Nothing
+                On Error Resume Next
+                Set swSkFeat = swSketchManager.ActiveSketch.GetFeature
+                On Error GoTo 0
+                If swSkFeat Is Nothing Then Set swSkFeat = FindLastSketchFeature()
+                If Not swSkFeat Is Nothing Then skName = swSkFeat.Name
+
+                ClearSWSelection
+                SelectPlaneFeature swFrontPlaneFeat, True
+                swSkPt.Select4 True, Nothing
+                boolstatus = swDoc.InsertAxis2(True)
+            End If
+            swSketchManager.InsertSketch True
+        End If
+    End If
+
+    ' Method 3: named sketch point after closing sketch
+    If Not boolstatus And skName <> "" Then
+        ClearSWSelection
+        docTitle = swDoc.GetTitle
+        ptName = "Point1@" & skName
+        If docTitle <> "" Then ptName = ptName & "@" & docTitle
+        SelectPlaneFeature swFrontPlaneFeat, True
+        boolstatus = swModelDocExt.SelectByID2(ptName, "EXTSKETCHPOINT", mSketchOffsetXM, mSketchOffsetYM, 0#, True, 0, Nothing, 0)
+        If Not boolstatus Then boolstatus = swModelDocExt.SelectByID2("Point1@" & skName, "EXTSKETCHPOINT", mSketchOffsetXM, mSketchOffsetYM, 0#, True, 0, Nothing, 0)
+        If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
+    End If
+
+    ExitActiveSketchIfAny
+    ClearSWSelection
+    RebuildSWPart
+
+    axisCountAfter = CountRefAxisFeatures()
+    If axisCountAfter <= axisCountBefore Then
+        DebugPrint "CreateGearAxisAtSketchCenter: no new axis (before=" & axisCountBefore & " after=" & axisCountAfter & ")"
+        Exit Function
+    End If
 
     Set swGearAxisFeat = FindLastRefAxisFeature()
-    If swGearAxisFeat Is Nothing Then Exit Function
+    If swGearAxisFeat Is Nothing Then
+        DebugPrint "CreateGearAxisAtSketchCenter: axis count increased but could not get axis feature"
+        Exit Function
+    End If
+
     mAxisName = swGearAxisFeat.Name
-    ClearSWSelection
+    mUseSketchCenterlineAsAxis = False
     CreateGearAxisAtSketchCenter = True
-    DebugPrint "CreateGearAxisAtSketchCenter OK: " & mAxisName
+    DebugPrint "CreateGearAxisAtSketchCenter OK: " & mAxisName & " (normal to Front) at " & Format(mSketchOffsetXM * MM_PER_M, "0.###") & " mm"
+End Function
+
+Private Function FindAddendumCylindricalFace() As SldWorks.Face2
+    Dim vFaces As Variant
+    Dim i As Long
+    Dim swFace As SldWorks.Face2
+    Dim swSurf As SldWorks.Surface
+
+    Set FindAddendumCylindricalFace = Nothing
+    If swAddendumExtrudeFeat Is Nothing Then Exit Function
+    On Error Resume Next
+    vFaces = swAddendumExtrudeFeat.GetFaces
+    On Error GoTo 0
+    If Not IsArray(vFaces) Then Exit Function
+    For i = LBound(vFaces) To UBound(vFaces)
+        Set swFace = vFaces(i)
+        If Not swFace Is Nothing Then
+            Set swSurf = swFace.GetSurface
+            If Not swSurf Is Nothing Then
+                If swSurf.IsCylinder() Then
+                    Set FindAddendumCylindricalFace = swFace
+                    Exit Function
+                End If
+            End If
+        End If
+    Next i
+End Function
+
+' Ref axis normal to gear face through driven centre — from cylindrical face of addendum blank (reliable when Axis1 exists)
+Public Function TryCreateDrivenRefAxisFromBossFace() As Boolean
+    Dim swFace As SldWorks.Face2
+    Dim axisCountBefore As Long
+    Dim axisCountAfter As Long
+
+    TryCreateDrivenRefAxisFromBossFace = False
+    If Not mDrivenPatternUsesBossFace And Not swGearAxisFeat Is Nothing Then Exit Function
+
+    Set swFace = FindAddendumCylindricalFace()
+    If swFace Is Nothing Then
+        DebugPrint "TryCreateDrivenRefAxisFromBossFace: no cylindrical face on blank boss"
+        Exit Function
+    End If
+
+    axisCountBefore = CountRefAxisFeatures()
+    ExitActiveSketchIfAny
+    ClearSWSelection
+    RebuildSWPart
+
+    On Error Resume Next
+    If Not SelectForCirPatternMark(swFace, 0, False) Then swFace.Select2 False, 0
+    boolstatus = swDoc.InsertAxis2(True)
+    If Err.Number <> 0 Then
+        DebugPrint "TryCreateDrivenRefAxisFromBossFace InsertAxis2 err: " & Err.Number & " " & Err.Description
+        Err.Clear
+        boolstatus = False
+    End If
+    On Error GoTo 0
+
+    ClearSWSelection
+    RebuildSWPart
+    axisCountAfter = CountRefAxisFeatures()
+
+    If axisCountAfter > axisCountBefore Then
+        Set swGearAxisFeat = FindLastRefAxisFeature()
+        If Not swGearAxisFeat Is Nothing Then
+            mAxisName = swGearAxisFeat.Name
+            mDrivenPatternUsesBossFace = False
+            TryCreateDrivenRefAxisFromBossFace = True
+            DebugPrint "TryCreateDrivenRefAxisFromBossFace OK: " & mAxisName
+            Exit Function
+        End If
+    End If
+
+    DebugPrint "TryCreateDrivenRefAxisFromBossFace: using cylindrical face directly (before=" & axisCountBefore & " after=" & axisCountAfter & ")"
+    mDrivenPatternUsesBossFace = True
+    TryCreateDrivenRefAxisFromBossFace = True
+End Function
+
+Private Function FindSecondRefAxisFeature() As SldWorks.Feature
+    Dim ft As SldWorks.Feature
+    Dim n As Long
+
+    n = 0
+    Set ft = swPart.FirstFeature
+    Do While Not ft Is Nothing
+        If FeatureIsRefAxis(ft) Then
+            n = n + 1
+            If n = 2 Then
+                Set FindSecondRefAxisFeature = ft
+                Exit Function
+            End If
+        End If
+        Set ft = ft.GetNextFeature
+    Loop
+End Function
+
+Private Function CountRefAxisFeatures() As Long
+    Dim ft As SldWorks.Feature
+    Dim n As Long
+    n = 0
+    Set ft = swPart.FirstFeature
+    Do While Not ft Is Nothing
+        If FeatureIsRefAxis(ft) Then n = n + 1
+        Set ft = ft.GetNextFeature
+    Loop
+    CountRefAxisFeatures = n
 End Function
 
 Private Function FindLastSketchFeature() As SldWorks.Feature
@@ -419,12 +683,37 @@ Private Function FindLastSketchFeature() As SldWorks.Feature
     Set FindLastSketchFeature = lastSk
 End Function
 
+Private Function FindLastCutExtrudeFeature() As SldWorks.Feature
+    Dim ft As SldWorks.Feature
+    Dim lastCut As SldWorks.Feature
+    Dim tn As String
+
+    Set ft = swPart.FirstFeature
+    Do While Not ft Is Nothing
+        tn = ft.GetTypeName2
+        If (tn = "CutExtrude") Or (Left$(ft.Name, 4) = "Cut-") Then Set lastCut = ft
+        Set ft = ft.GetNextFeature
+    Loop
+    Set FindLastCutExtrudeFeature = lastCut
+End Function
+
+Private Sub ResolveToothCutForPattern()
+    If Not swToothCutFeat Is Nothing Then Exit Sub
+    Set swToothCutFeat = FindLastCutExtrudeFeature()
+    If Not swToothCutFeat Is Nothing Then
+        DebugPrint "ResolveToothCutForPattern: using " & swToothCutFeat.Name
+        Exit Sub
+    End If
+    If GearTrainRole = GEAR_ROLE_DRIVEN Then Exit Sub
+    Set swToothCutFeat = FindFeatureByNameSafe("Cut-Extrude1")
+End Sub
+
 Private Function FindLastRefAxisFeature() As SldWorks.Feature
     Dim ft As SldWorks.Feature
     Dim lastAxis As SldWorks.Feature
     Set ft = swPart.FirstFeature
     Do While Not ft Is Nothing
-        If ft.GetTypeName2 = "RefAxis" Then Set lastAxis = ft
+        If FeatureIsRefAxis(ft) Then Set lastAxis = ft
         Set ft = ft.GetNextFeature
     Loop
     Set FindLastRefAxisFeature = lastAxis
@@ -434,32 +723,71 @@ End Function
 ' 3. CreateOrResetPart
 ' ---------------------------------------------------------------------------
 Public Function CreateOrResetPart() As Boolean
-    On Error GoTo PartFail
+    Dim axisOk As Boolean
 
     mFrontPlaneName = ""
     mAxisName = ""
 
-    swDoc.ViewZoomtofit2
-    swDoc.GraphicsRedraw2
+    If GearTrainRole <> GEAR_ROLE_DRIVEN Then
+        On Error Resume Next
+        swDoc.ViewZoomtofit2
+        swDoc.GraphicsRedraw2
+        Err.Clear
+        On Error GoTo 0
+    End If
 
-    If Not ResolveAndStoreFrontPlane() Then GoTo PartFail
-    If Not CreateGearAxis() Then GoTo PartFail
+    ExitActiveSketchIfAny
 
+    If Not ResolveAndStoreFrontPlane() Then
+        DebugPrint "CreateOrResetPart: ResolveAndStoreFrontPlane failed"
+        CreateOrResetPart = False
+        Exit Function
+    End If
+
+    On Error Resume Next
+    axisOk = CreateGearAxis()
+    If Err.Number <> 0 Then
+        DebugPrint "CreateOrResetPart: CreateGearAxis error " & Err.Number & " " & Err.Description
+        Err.Clear
+        axisOk = False
+    End If
+    On Error GoTo 0
+    If Not axisOk Then
+        DebugPrint "CreateOrResetPart: CreateGearAxis failed (driven=" & (GearTrainRole = GEAR_ROLE_DRIVEN) & _
+            " centerline=" & mUseSketchCenterlineAsAxis & ")"
+        CreateOrResetPart = False
+        Exit Function
+    End If
+
+    ExitActiveSketchIfAny
+    ClearSWSelection
+
+    On Error Resume Next
     swSketchManager.AddToDB = True
     swSketchManager.AutoSolve = False
-    On Error Resume Next
     Set swSelData = swSelMgr.CreateSelectData
+    Err.Clear
     On Error GoTo 0
 
-    ' Do not rebuild here - rebuild before root sketch breaks plane.Select on NewPart
-    DebugPrint "CreateOrResetPart OK"
+    DebugPrint "CreateOrResetPart OK (axis=" & mAxisName & ")"
     CreateOrResetPart = True
-    Exit Function
-
-PartFail:
-    DebugPrint "CreateOrResetPart FAIL: " & Err.Number & " " & Err.Description
-    CreateOrResetPart = False
 End Function
+
+' Driving gear: pitch/addendum/dedendum center at part origin (concentric to Origin)
+Private Sub ConstrainGearCenterToOrigin(ByVal swCircle As SldWorks.SketchSegment)
+    On Error Resume Next
+    If swCircle Is Nothing Then Exit Sub
+    If Abs(mSketchOffsetXM) > 0.0000000001 Or Abs(mSketchOffsetYM) > 0.0000000001 Then Exit Sub
+
+    ClearSWSelection
+    boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0#, 0#, 0#, False, 0, Nothing, 0)
+    If Not boolstatus Then Exit Sub
+    swCircle.Select4 True, Nothing
+    swDoc.SketchAddConstraints "sgCONCENTRIC"
+    ClearSWSelection
+    DebugPrint "ConstrainGearCenterToOrigin: circle center concentric to Origin"
+    On Error GoTo 0
+End Sub
 
 ' ---------------------------------------------------------------------------
 ' 4. CreateAddendumBlank - full disk at outer (addendum) diameter
@@ -470,6 +798,8 @@ Public Function CreateAddendumBlank() As Boolean
     Dim rM As Double
 
     rM = GearGeom.AddendumRadiusM
+    ExitActiveSketchIfAny
+    If GearTrainRole = GEAR_ROLE_DRIVEN Then RebuildSWPart
 
     If Not BeginSketchOnFrontPlane() Then
         DebugPrint "CreateAddendumBlank: BeginSketchOnFrontPlane failed"
@@ -481,6 +811,7 @@ Public Function CreateAddendumBlank() As Boolean
     If swCircle Is Nothing Then GoTo BlankFail
 
     AddDiameterDimensionToCircle swCircle, GEAR_DIM_ADDENDUM_DIAMETER, GearGeom.AddendumDiameterMM
+    ConstrainGearCenterToOrigin swCircle
 
     swSketchManager.InsertSketch True
     Set swAddendumExtrudeFeat = swFeatMgr.FeatureExtrusion3(True, False, False, 0, 0, GearGeom.WidthM, 0#, _
@@ -492,6 +823,13 @@ Public Function CreateAddendumBlank() As Boolean
     ClearSWSelection
     RebuildSWPart
     DebugPrint "CreateAddendumBlank OK (Da/2=" & Format(GearGeom.AddendumRadiusMM, "0.###") & " mm)"
+
+    If GearTrainRole = GEAR_ROLE_DRIVEN Then
+        If mDrivenPatternUsesBossFace Or swGearAxisFeat Is Nothing Then
+            TryCreateDrivenRefAxisFromBossFace
+        End If
+    End If
+
     CreateAddendumBlank = True
     Exit Function
 
@@ -949,6 +1287,7 @@ Private Function PreselectCircularPattern(ByRef stepDetail As String) As Boolean
     Dim axisName As String
     Dim toothOk As Boolean
     Dim axisOk As Boolean
+    Dim swCylFace As SldWorks.Face2
 
     PreselectCircularPattern = False
     stepDetail = "clear"
@@ -976,6 +1315,13 @@ Private Function PreselectCircularPattern(ByRef stepDetail As String) As Boolean
     End If
     If Not axisOk And Not swGearAxisFeat Is Nothing Then
         axisOk = SelectForCirPatternMark(swGearAxisFeat, 1, True)
+    End If
+    If Not axisOk And (mDrivenPatternUsesBossFace Or GearTrainRole = GEAR_ROLE_DRIVEN) Then
+        Set swCylFace = FindAddendumCylindricalFace()
+        If Not swCylFace Is Nothing Then
+            axisOk = SelectForCirPatternMark(swCylFace, 1, True)
+            If axisOk Then DebugPrint "Preselect: pattern axis = addendum cylindrical face"
+        End If
     End If
     If Not axisOk Then
         DebugPrint "Preselect: axis failed for " & axisName
@@ -1030,21 +1376,32 @@ Public Function CircularPatternTooth() As Boolean
     Dim axisName As String
 
     stepDetail = "resolve refs"
-    If swGearAxisFeat Is Nothing Then Set swGearAxisFeat = FindLastRefAxisFeature()
+    mUseSketchCenterlineAsAxis = False
     If swGearAxisFeat Is Nothing And mAxisName <> "" Then Set swGearAxisFeat = FindFeatureByNameSafe(mAxisName)
+    If swGearAxisFeat Is Nothing And GearTrainRole = GEAR_ROLE_DRIVEN Then Set swGearAxisFeat = FindSecondRefAxisFeature()
+    If swGearAxisFeat Is Nothing Then Set swGearAxisFeat = FindLastRefAxisFeature()
+    ResolveToothCutForPattern
     If swToothCutFeat Is Nothing Then
-        Set swToothCutFeat = FindFeatureByNameSafe("Cut-Extrude1")
-        If swToothCutFeat Is Nothing Then Set swToothCutFeat = FindFeatureByNameSafe("Boss-Extrude2")
+        DebugPrint "CircularPatternTooth: missing tooth gap cut"
+        GoTo PatternFail
     End If
-    If swToothCutFeat Is Nothing Or swGearAxisFeat Is Nothing Then
-        DebugPrint "CircularPatternTooth: missing axis or tooth gap cut"
+    If GearTrainRole = GEAR_ROLE_DRIVEN Then
+        RebuildSWPart
+        If swGearAxisFeat Is Nothing Or mDrivenPatternUsesBossFace Then TryCreateDrivenRefAxisFromBossFace
+        If swGearAxisFeat Is Nothing And mAxisName <> "" Then Set swGearAxisFeat = FindFeatureByNameSafe(mAxisName)
+        If swGearAxisFeat Is Nothing Then Set swGearAxisFeat = FindSecondRefAxisFeature()
+    End If
+
+    If swGearAxisFeat Is Nothing And mAxisName = "" And FindAddendumCylindricalFace() Is Nothing Then
+        DebugPrint "CircularPatternTooth: missing ref axis and no cylindrical face on blank"
         GoTo PatternFail
     End If
 
     toothName = swToothCutFeat.Name
     axisName = mAxisName
-    If axisName = "" Then axisName = swGearAxisFeat.Name
-    DebugPrint "Pattern seed=" & toothName & " axis=" & axisName
+    If axisName = "" And Not swGearAxisFeat Is Nothing Then axisName = swGearAxisFeat.Name
+    DebugPrint "Pattern seed=" & toothName & " axis=" & axisName & _
+        IIf(mDrivenPatternUsesBossFace And axisName = "", " (cylindrical face)", "")
 
     ' Method 1: SelectByID2 BODYFEATURE + AXIS (correct order) then CreateFeature
     stepDetail = "select BODYFEATURE+AXIS"
@@ -1056,13 +1413,46 @@ Public Function CircularPatternTooth() As Boolean
     If PreselectCircularPattern(stepDetail) Then
         On Error Resume Next
         Set swPatternFeat = swFeatMgr.FeatureCircularPattern4(GearGeom.NumTeeth, 2# * Pi, True, "NULL", False, False, True)
+        If swPatternFeat Is Nothing And mAxisName <> "" Then
+            Set swPatternFeat = swFeatMgr.FeatureCircularPattern4(GearGeom.NumTeeth, 2# * Pi, True, mAxisName, False, False, True)
+        End If
         On Error GoTo PatternFail
         If Not swPatternFeat Is Nothing Then GoTo PatternOk
+        DebugPrint "FeatureCircularPattern4 returned Nothing after preselect"
     End If
 
-    ' Method 3: select edge on axis (some SW versions require edge not AXIS entity)
+    ' Method 2b: FeaturesToPattern + ref axis feature (driven Axis2)
+    If Not mUseSketchCenterlineAsAxis And Not swGearAxisFeat Is Nothing Then
+        stepDetail = "FeaturesToPattern+RefAxis"
+        Set swFeatData = swFeatMgr.CreateDefinition(swFeatureNameID_e.swFmCirPattern)
+        If Not swFeatData Is Nothing Then
+            swFeatData.BodyPattern = False
+            swFeatData.GeometryPattern = False
+            swFeatData.EqualSpacing = True
+            swFeatData.ReverseDirection = False
+            swFeatData.Spacing = 2# * Pi
+            swFeatData.TotalInstances = GearGeom.NumTeeth
+            swFeatData.Direction2 = False
+            swFeatData.VarySketch = False
+            On Error Resume Next
+            Set featArr(0) = swToothCutFeat
+            vFeatArr = featArr
+            swFeatData.FeaturesToPattern = vFeatArr
+            Set swFeatData.Axis = swGearAxisFeat
+            Set swPatternFeat = swFeatMgr.CreateFeature(swFeatData)
+            If Err.Number <> 0 Then
+                DebugPrint "FeaturesToPattern+RefAxis err: " & Err.Number & " " & Err.Description
+                Err.Clear
+            End If
+            On Error GoTo PatternFail
+            If Not swPatternFeat Is Nothing Then GoTo PatternOk
+        End If
+    End If
+
+    ' Method 3: select edge on axis (ref axis only; sketch centerline uses Method 1/2)
     stepDetail = "axis edge"
     ClearSWSelection
+    If Not mUseSketchCenterlineAsAxis Then
     If swModelDocExt.SelectByID2(toothName, "BODYFEATURE", 0, 0, 0, False, 4, Nothing, 0) Then
         If swModelDocExt.SelectByID2(axisName, "EDGE", 0, 0, 0, True, 1, Nothing, 0) Then
             Set swFeatData = swFeatMgr.CreateDefinition(swFeatureNameID_e.swFmCirPattern)
@@ -1076,8 +1466,10 @@ Public Function CircularPatternTooth() As Boolean
             End If
         End If
     End If
+    End If
 
-    ' Method 4: FeaturesToPattern + Axis on feature data (no selection)
+    ' Method 4: FeaturesToPattern + Axis on feature data (ref axis only)
+    If Not mUseSketchCenterlineAsAxis Then
     stepDetail = "FeaturesToPattern property"
     Set swFeatData = swFeatMgr.CreateDefinition(swFeatureNameID_e.swFmCirPattern)
     If Not swFeatData Is Nothing Then
@@ -1099,6 +1491,7 @@ Public Function CircularPatternTooth() As Boolean
         If Not swPatternFeat Is Nothing Then GoTo PatternOk
         DebugPrint "FeaturesToPattern CreateFeature failed: " & Err.Number & " " & Err.Description
         Err.Clear
+    End If
     End If
 
     GoTo PatternFail

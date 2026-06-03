@@ -18,8 +18,11 @@
 '   tbMeshAngle      TextBox       default "0"
 '   lblTrainCenter   Label         Caption "Centre distance:"
 '   tbTrainCenter    TextBox       Locked=True (read-only, shows C = m(z1+z2)/2)
-'   cboMfgMethod     ComboBox      Style=2 (dropdown list) — items filled in code, not RowSource
-'   tbCenterClearance, tbBacklash, tbTrainCenterAdjusted
+'   fraManufacturing Frame
+'   cboMfgMethod / cboMfgMethods  ComboBox Style=2 — items filled in code
+'   tbCenterClearance OR TextBox1 (in fraManufacturing) = centre clearance added to C (mm)
+'   tbBacklash OR TextBox2 = backlash at pitch circle (mm), added to layout C
+'   tbTrainCenterAdjusted OR TextBox3 = read-only adjusted centre distance (mm)
 '
 ' Existing controls: tbPressureAngle, tbModule, tbTeeth, tbWidth, cbGenerate, etc.
 
@@ -34,6 +37,7 @@ Private Sub UserForm_Initialize()
     If ControlExists("tbMeshAngle") Then tbMeshAngle.Text = "0"
 
     InitMfgMethodCombo
+    InitMfgControlTooltips
 
     UpdateGearRoleUI
     On Error GoTo 0
@@ -91,22 +95,110 @@ Private Function FindControlByName(ByVal parent As Object, ByVal ctrlName As Str
     Next c
 End Function
 
-' ComboBox on a SW UserForm: RowSource does not work — use AddItem in Initialize.
-' Control (Name) must be cboMfgMethod, or left as ComboBox1 (fallback below).
+Private Function GetManufacturingFrame() As Object
+    Set GetManufacturingFrame = FindControlByName(Me, "fraManufacturing")
+End Function
+
+' Manufacturing combo only (do not use cboDrivingGearBody)
 Private Function GetMfgMethodCombo() As Object
+    Dim fra As Object
     Dim names As Variant
     Dim i As Long
-    Dim c As Object
-    names = Array("cboMfgMethod", "ComboBox1", "ComboBox2")
+
+    Set GetMfgMethodCombo = Nothing
+    Set fra = GetManufacturingFrame()
+    names = Array("cboMfgMethods", "cboMfgMethod", "ComboBox3")
     For i = LBound(names) To UBound(names)
-        Set GetMfgMethodCombo = FindControlByName(Me, CStr(names(i)))
+        If Not fra Is Nothing Then
+            Set GetMfgMethodCombo = FindControlByName(fra, CStr(names(i)))
+        Else
+            Set GetMfgMethodCombo = FindControlByName(Me, CStr(names(i)))
+        End If
         If Not GetMfgMethodCombo Is Nothing Then Exit Function
     Next i
-    For Each c In AllComboBoxesOnForm(Me)
-        Set GetMfgMethodCombo = c
-        Exit Function
-    Next c
 End Function
+
+Private Function GetMfgClearanceTextBox() As Object
+    Dim fra As Object
+    Dim names As Variant
+    Dim i As Long
+    Set fra = GetManufacturingFrame()
+    names = Array("tbCenterClearance", "TextBox1")
+    For i = LBound(names) To UBound(names)
+        If Not fra Is Nothing Then
+            Set GetMfgClearanceTextBox = FindControlByName(fra, CStr(names(i)))
+        Else
+            Set GetMfgClearanceTextBox = FindControlByName(Me, CStr(names(i)))
+        End If
+        If Not GetMfgClearanceTextBox Is Nothing Then Exit Function
+    Next i
+End Function
+
+Private Function GetMfgBacklashTextBox() As Object
+    Dim fra As Object
+    Dim names As Variant
+    Dim i As Long
+    Set fra = GetManufacturingFrame()
+    names = Array("tbBacklash", "TextBox2")
+    For i = LBound(names) To UBound(names)
+        If Not fra Is Nothing Then
+            Set GetMfgBacklashTextBox = FindControlByName(fra, CStr(names(i)))
+        Else
+            Set GetMfgBacklashTextBox = FindControlByName(Me, CStr(names(i)))
+        End If
+        If Not GetMfgBacklashTextBox Is Nothing Then Exit Function
+    Next i
+End Function
+
+Private Function GetMfgAdjustedCenterTextBox() As Object
+    Dim fra As Object
+    Dim names As Variant
+    Dim i As Long
+    Set fra = GetManufacturingFrame()
+    names = Array("tbTrainCenterAdjusted", "TextBox3")
+    For i = LBound(names) To UBound(names)
+        If Not fra Is Nothing Then
+            Set GetMfgAdjustedCenterTextBox = FindControlByName(fra, CStr(names(i)))
+        Else
+            Set GetMfgAdjustedCenterTextBox = FindControlByName(Me, CStr(names(i)))
+        End If
+        If Not GetMfgAdjustedCenterTextBox Is Nothing Then Exit Function
+    Next i
+End Function
+
+Private Sub SetMfgTextBox(ByVal ctrl As Object, ByVal value As String)
+    On Error Resume Next
+    If ctrl Is Nothing Then Exit Sub
+    ctrl.Text = value
+    On Error GoTo 0
+End Sub
+
+Private Function GetMfgTextBoxValue(ByVal ctrl As Object) As String
+    GetMfgTextBoxValue = ""
+    On Error Resume Next
+    If Not ctrl Is Nothing Then GetMfgTextBoxValue = Trim$(ctrl.Text)
+    On Error GoTo 0
+End Function
+
+Private Sub SetControlTip(ByVal ctrlName As String, ByVal tip As String, Optional ByVal searchInFrame As String = "")
+    Dim parent As Object
+    Dim ctrl As Object
+    Set parent = Me
+    If searchInFrame <> "" Then Set parent = FindControlByName(Me, searchInFrame)
+    If parent Is Nothing Then Set parent = Me
+    Set ctrl = FindControlByName(parent, ctrlName)
+    If ctrl Is Nothing Then Exit Sub
+    On Error Resume Next
+    ctrl.ControlTipText = tip
+    On Error GoTo 0
+End Sub
+
+Private Sub SetControlTipOnObject(ByVal ctrl As Object, ByVal tip As String)
+    On Error Resume Next
+    If ctrl Is Nothing Then Exit Sub
+    ctrl.ControlTipText = tip
+    On Error GoTo 0
+End Sub
 
 Private Function AllComboBoxesOnForm(ByVal parent As Object) As Collection
     Dim result As New Collection
@@ -151,25 +243,77 @@ End Sub
 
 Private Sub ApplyMfgMethodDefaults()
     Dim cb As Object
+    Dim clr As String
+    Dim bl As String
+
     On Error Resume Next
     Set cb = GetMfgMethodCombo()
     If cb Is Nothing Then Exit Sub
+
     Select Case cb.ListIndex
-        Case 1
-            SetFormTextBox "tbCenterClearance", "0.15"
-            SetFormTextBox "tbBacklash", "0.10"
-        Case 2
-            SetFormTextBox "tbCenterClearance", "0.03"
-            SetFormTextBox "tbBacklash", "0"
-        Case 0, 3
-            SetFormTextBox "tbCenterClearance", "0"
-            SetFormTextBox "tbBacklash", "0"
+        Case 1          ' 3D print
+            clr = "0.15"
+            bl = "0.10"
+        Case 2          ' CNC
+            clr = "0.03"
+            bl = "0"
+        Case Else       ' Nominal (CAD), OTS (catalog)
+            clr = "0"
+            bl = "0"
     End Select
+
+    SetMfgTextBox GetMfgClearanceTextBox(), clr
+    SetMfgTextBox GetMfgBacklashTextBox(), bl
     UpdateTrainCenterDistance
     On Error GoTo 0
 End Sub
 
+Private Sub InitMfgControlTooltips()
+    Dim tipMethod As String
+    Dim tipClr As String
+    Dim tipBl As String
+    Dim tipAdj As String
+
+    tipMethod = "Preset centre clearance and backlash for the selected process. Values fill automatically; you can edit them."
+    tipClr = "Extra centre distance added to the nominal value (mm). Covers assembly clearance, print shrink, and housing tolerance. Added when placing the driven gear."
+    tipBl = "Backlash: circumferential gap between mating teeth at the pitch circle (mm). Prevents binding as teeth mesh; larger for 3D print, smaller for CNC. This value is added to centre distance for driven-gear layout."
+    tipAdj = "Centre distance used for driven gear placement = nominal + clearance + backlash (mm). Updates when you change method, teeth, or the values above."
+
+    SetControlTipOnObject GetMfgMethodCombo(), tipMethod
+    SetControlTipOnObject GetMfgClearanceTextBox(), tipClr
+    SetControlTipOnObject GetMfgBacklashTextBox(), tipBl
+    SetControlTipOnObject GetMfgAdjustedCenterTextBox(), tipAdj
+
+    SetControlTip "cboMfgMethods", tipMethod, "fraManufacturing"
+    SetControlTip "cboMfgMethod", tipMethod, "fraManufacturing"
+    SetControlTip "tbCenterClearance", tipClr, "fraManufacturing"
+    SetControlTip "TextBox1", tipClr, "fraManufacturing"
+    SetControlTip "tbBacklash", tipBl, "fraManufacturing"
+    SetControlTip "TextBox2", tipBl, "fraManufacturing"
+    SetControlTip "tbTrainCenterAdjusted", tipAdj, "fraManufacturing"
+    SetControlTip "TextBox3", tipAdj, "fraManufacturing"
+End Sub
+
+' Called from Module1 when generating a driven gear
+Public Function MfgClearanceMM() As Double
+    On Error Resume Next
+    MfgClearanceMM = 0#
+    If GetMfgTextBoxValue(GetMfgClearanceTextBox()) <> "" Then MfgClearanceMM = CDbl(GetMfgTextBoxValue(GetMfgClearanceTextBox()))
+    On Error GoTo 0
+End Function
+
+Public Function MfgBacklashMM() As Double
+    On Error Resume Next
+    MfgBacklashMM = 0#
+    If GetMfgTextBoxValue(GetMfgBacklashTextBox()) <> "" Then MfgBacklashMM = CDbl(GetMfgTextBoxValue(GetMfgBacklashTextBox()))
+    On Error GoTo 0
+End Function
+
 Private Sub cboMfgMethod_Change()
+    ApplyMfgMethodDefaults
+End Sub
+
+Private Sub cboMfgMethods_Change()
     ApplyMfgMethodDefaults
 End Sub
 
@@ -181,11 +325,27 @@ Private Sub ComboBox2_Change()
     ApplyMfgMethodDefaults
 End Sub
 
+Private Sub ComboBox3_Change()
+    ApplyMfgMethodDefaults
+End Sub
+
 Private Sub tbCenterClearance_Change()
     UpdateTrainCenterDistance
 End Sub
 
 Private Sub tbBacklash_Change()
+    UpdateTrainCenterDistance
+End Sub
+
+Private Sub TextBox1_Change()
+    UpdateTrainCenterDistance
+End Sub
+
+Private Sub TextBox2_Change()
+    UpdateTrainCenterDistance
+End Sub
+
+Private Sub TextBox3_Change()
     UpdateTrainCenterDistance
 End Sub
 
@@ -206,8 +366,18 @@ Private Sub UpdateGearRoleUI()
     SetFormControlVisible "tbMeshAngle", showDriven
     SetFormControlVisible "lblTrainCenter", showDriven
     SetFormControlVisible "tbTrainCenter", showDriven
+    SetFormControlVisible "fraManufacturing", showDriven
+    SetFormControlVisible "tbTrainCenterAdjusted", showDriven
+    SetFormControlVisible "tbCenterClearance", showDriven
+    SetFormControlVisible "tbBacklash", showDriven
+    SetFormControlVisible "TextBox1", showDriven
+    SetFormControlVisible "TextBox2", showDriven
+    SetFormControlVisible "TextBox3", showDriven
+    SetFormControlVisible "cboMfgMethods", showDriven
+    SetFormControlVisible "cboMfgMethod", showDriven
 
     If showDriven Then
+        ApplyMfgMethodDefaults
         tbModule.Enabled = False
         tbPressureAngle.Enabled = False
         tbModule.BackColor = RGB(240, 240, 240)
@@ -330,13 +500,20 @@ End Sub
 
 Private Sub UpdateAdjustedCenterDistance(ByVal cNominal As Double)
     Dim deltaC As Double
+    Dim backlash As Double
     Dim clrText As String
+    Dim blText As String
     On Error Resume Next
-    If Not ControlExists("tbTrainCenterAdjusted") Then Exit Sub
     deltaC = 0#
-    clrText = GetFormTextBox("tbCenterClearance")
+    backlash = 0#
+    clrText = GetMfgTextBoxValue(GetMfgClearanceTextBox())
     If clrText <> "" Then deltaC = CDbl(clrText)
-    SetFormTextBox "tbTrainCenterAdjusted", Format(cNominal + deltaC, "0.###") & " mm"
+    blText = GetMfgTextBoxValue(GetMfgBacklashTextBox())
+    If blText <> "" Then backlash = CDbl(blText)
+
+    GearTrainLayoutCenterDistanceMM = cNominal + deltaC + backlash
+
+    SetMfgTextBox GetMfgAdjustedCenterTextBox(), Format(GearTrainLayoutCenterDistanceMM, "0.###") & " mm"
     On Error GoTo 0
 End Sub
 
@@ -416,8 +593,10 @@ Private Sub cbGenerate_Click()
         On Error Resume Next
         GearTrainMeshAngleDeg = CDbl(tbMeshAngle.Text)
         On Error GoTo 0
+        UpdateTrainCenterDistance
     Else
         GearTrainRole = GEAR_ROLE_DRIVING
+        GearTrainLayoutCenterDistanceMM = 0#
     End If
 
     ' --- validation (same as before) ---
