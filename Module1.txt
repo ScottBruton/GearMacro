@@ -379,6 +379,8 @@ Public Function CreateAddendumBlank() As Boolean
     Set swCircle = swSketchManager.CreateCircleByRadius(0, 0, 0, rM)
     If swCircle Is Nothing Then GoTo BlankFail
 
+    NameGearDimensionOnCircle swCircle, GEAR_DIM_ADDENDUM_RADIUS, GearGeom.AddendumRadiusMM
+
     swSketchManager.InsertSketch True
     Set swAddendumExtrudeFeat = swFeatMgr.FeatureExtrusion3(True, False, False, 0, 0, GearGeom.WidthM, 0#, _
         False, False, False, False, 0, 0, False, False, False, False, True, False, False, 0, 0, False)
@@ -1113,6 +1115,398 @@ ValFail:
     DebugPrint "RebuildAndValidate FAIL: " & Err.Description
     RebuildAndValidate = False
 End Function
+
+' ---------------------------------------------------------------------------
+' Gear train metadata (custom properties + named sketch dimensions)
+' ---------------------------------------------------------------------------
+Public Const GEAR_DIM_ADDENDUM_RADIUS As String = "InvoluteGear_Da_Radius"
+Public Const GEAR_DIM_DEDENDUM_RADIUS As String = "InvoluteGear_Dd_Radius"
+Public Const GEAR_DIM_MODULE As String = "InvoluteGear_Module"
+Public Const GEAR_DIM_NUM_TEETH As String = "InvoluteGear_NumTeeth"
+Public Const GEAR_DIM_PRESSURE_ANGLE As String = "InvoluteGear_PressureAngle"
+Public Const GEAR_DIM_WIDTH As String = "InvoluteGear_Width"
+Public Const GEAR_DIM_PITCH_DIAMETER As String = "InvoluteGear_PitchDiameter"
+
+Public Const GEAR_PROP_MODULE As String = "InvoluteGear_Module"
+Public Const GEAR_PROP_TEETH As String = "InvoluteGear_Teeth"
+Public Const GEAR_PROP_PRESSURE As String = "InvoluteGear_PressureAngle"
+Public Const GEAR_PROP_WIDTH As String = "InvoluteGear_Width"
+Public Const GEAR_PROP_PITCH_DIA As String = "InvoluteGear_PitchDiameter"
+Public Const GEAR_PROP_ADDENDUM_DIA As String = "InvoluteGear_AddendumDiameter"
+
+Public Function CenterDistanceMM(ByVal moduleMM As Double, ByVal z1 As Long, ByVal z2 As Long) As Double
+    CenterDistanceMM = moduleMM * (CDbl(z1) + CDbl(z2)) / 2#
+End Function
+
+Private Sub SetPartCustomProperty(ByVal propName As String, ByVal propValue As String)
+    Dim swCustPropMgr As SldWorks.CustomPropertyManager
+    On Error Resume Next
+    Set swCustPropMgr = swModelDocExt.CustomPropertyManager("")
+    If swCustPropMgr Is Nothing Then Exit Sub
+    swCustPropMgr.Add3 propName, swCustomInfoType_e.swCustomInfoText, propValue, swCustomPropertyAddOption_e.swCustomPropertyDeleteAndAdd
+    On Error GoTo 0
+End Sub
+
+Public Sub StoreGearMetadataOnPart()
+    On Error Resume Next
+    If swModelDocExt Is Nothing Then Exit Sub
+    SetPartCustomProperty GEAR_PROP_MODULE, CStr(GearGeom.ModuleMM)
+    SetPartCustomProperty GEAR_PROP_TEETH, CStr(GearGeom.NumTeeth)
+    SetPartCustomProperty GEAR_PROP_PRESSURE, CStr(GearGeom.PressureAngleDeg)
+    SetPartCustomProperty GEAR_PROP_WIDTH, CStr(GearGeom.WidthMM)
+    SetPartCustomProperty GEAR_PROP_PITCH_DIA, CStr(GearGeom.PitchDiameterMM)
+    SetPartCustomProperty GEAR_PROP_ADDENDUM_DIA, CStr(GearGeom.AddendumDiameterMM)
+    DebugPrint "StoreGearMetadataOnPart OK"
+    On Error GoTo 0
+End Sub
+
+Private Function ReadPartCustomPropertyDouble(ByVal swExt As SldWorks.ModelDocExtension, ByVal propName As String, ByRef outVal As Double) As Boolean
+    Dim valOut As String
+    Dim resolvedValOut As String
+    Dim useVal As String
+    On Error Resume Next
+    ReadPartCustomPropertyDouble = False
+    valOut = ""
+    resolvedValOut = ""
+    swExt.CustomPropertyManager("").Get4 propName, False, valOut, resolvedValOut
+    useVal = resolvedValOut
+    If useVal = "" Then useVal = valOut
+    If useVal <> "" Then
+        outVal = CDbl(useVal)
+        ReadPartCustomPropertyDouble = True
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function ReadPartCustomPropertyLong(ByVal swExt As SldWorks.ModelDocExtension, ByVal propName As String, ByRef outVal As Long) As Boolean
+    Dim valOut As String
+    Dim resolvedValOut As String
+    Dim useVal As String
+    On Error Resume Next
+    ReadPartCustomPropertyLong = False
+    valOut = ""
+    resolvedValOut = ""
+    swExt.CustomPropertyManager("").Get4 propName, False, valOut, resolvedValOut
+    useVal = resolvedValOut
+    If useVal = "" Then useVal = valOut
+    If useVal <> "" Then
+        outVal = CLng(useVal)
+        ReadPartCustomPropertyLong = True
+    End If
+    On Error GoTo 0
+End Function
+
+Public Function ReadGearMetadataFromDoc(ByVal swSourceDoc As SldWorks.ModelDoc2, ByRef moduleMM As Double, ByRef numTeeth As Long, _
+    ByRef pressureDeg As Double, ByRef widthMM As Double) As Boolean
+    Dim swExt As SldWorks.ModelDocExtension
+    On Error GoTo ReadFail
+    ReadGearMetadataFromDoc = False
+    If swSourceDoc Is Nothing Then Exit Function
+    Set swExt = swSourceDoc.Extension
+    If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_MODULE, moduleMM) Then Exit Function
+    If Not ReadPartCustomPropertyLong(swExt, GEAR_PROP_TEETH, numTeeth) Then Exit Function
+    If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_PRESSURE, pressureDeg) Then Exit Function
+    If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_WIDTH, widthMM) Then widthMM = GearGeom.WidthMM
+    ReadGearMetadataFromDoc = True
+    Exit Function
+ReadFail:
+    ReadGearMetadataFromDoc = False
+End Function
+
+Private Sub ClearDrivingGearComboList()
+    GearTrainDrivingComboCount = 0
+    Erase GearTrainDrivingComboPartTitle
+    Erase GearTrainDrivingComboBodyName
+End Sub
+
+Private Sub AppendDrivingGearComboEntry(ByVal partTitle As String, ByVal bodyName As String)
+    Dim n As Long
+    n = GearTrainDrivingComboCount
+    ReDim Preserve GearTrainDrivingComboPartTitle(0 To n)
+    ReDim Preserve GearTrainDrivingComboBodyName(0 To n)
+    GearTrainDrivingComboPartTitle(n) = partTitle
+    GearTrainDrivingComboBodyName(n) = bodyName
+    GearTrainDrivingComboCount = n + 1
+End Sub
+
+Private Function BodyDisplayName(ByVal swBody As SldWorks.Body2, ByVal index1 As Long) As String
+    On Error Resume Next
+    BodyDisplayName = Trim$(swBody.Name)
+    If BodyDisplayName = "" Then BodyDisplayName = "Solid Body " & CStr(index1)
+    On Error GoTo 0
+End Function
+
+Private Function FindOpenPartDocumentByTitle(ByVal partTitle As String) As SldWorks.ModelDoc2
+    Dim swDocWalk As SldWorks.ModelDoc2
+    On Error Resume Next
+    Set FindOpenPartDocumentByTitle = Nothing
+    If partTitle = "" Then Exit Function
+    Set FindOpenPartDocumentByTitle = swApp.GetOpenDocumentByName(partTitle)
+    If Not FindOpenPartDocumentByTitle Is Nothing Then Exit Function
+    Set swDocWalk = swApp.GetFirstDocument
+    Do While Not swDocWalk Is Nothing
+        If swDocWalk.GetTitle = partTitle And swDocWalk.GetType = swDocumentTypes_e.swDocPART Then
+            Set FindOpenPartDocumentByTitle = swDocWalk
+            Exit Function
+        End If
+        Set swDocWalk = swDocWalk.GetNext
+    Loop
+    On Error GoTo 0
+End Function
+
+Private Function DrivingGearComboDisplayText(ByVal partTitle As String, ByVal bodyName As String, _
+    ByVal hasGearMeta As Boolean, ByVal z1 As Long, ByVal modMM As Double) As String
+    If hasGearMeta Then
+        DrivingGearComboDisplayText = bodyName & "  (" & partTitle & ", z=" & z1 & ", m=" & Format(modMM, "0.###") & ")"
+    Else
+        DrivingGearComboDisplayText = bodyName & "  (" & partTitle & " — not a macro gear)"
+    End If
+End Function
+
+Private Sub AddSolidBodiesFromPartToCombo(ByVal swPartDoc As SldWorks.ModelDoc2)
+    Dim swPart As SldWorks.PartDoc
+    Dim vBodies As Variant
+    Dim swBody As SldWorks.Body2
+    Dim i As Long
+    Dim nBodies As Long
+    Dim partTitle As String
+    Dim bodyName As String
+    Dim modMM As Double
+    Dim z1 As Long
+    Dim pa As Double
+    Dim w As Double
+    Dim hasMeta As Boolean
+
+    If swPartDoc Is Nothing Then Exit Sub
+    If swPartDoc.GetType <> swDocumentTypes_e.swDocPART Then Exit Sub
+    Set swPart = swPartDoc
+    partTitle = swPartDoc.GetTitle
+    hasMeta = ReadGearMetadataFromDoc(swPartDoc, modMM, z1, pa, w)
+    If Not hasMeta Then
+        AppendDrivingGearComboEntry partTitle, "(not a macro gear — generate driving gear first)"
+        Exit Sub
+    End If
+
+    vBodies = swPart.GetBodies2(swBodyType_e.swSolidBody, True)
+    If IsEmpty(vBodies) Then
+        AppendDrivingGearComboEntry partTitle, "(no solid bodies)"
+        Exit Sub
+    End If
+
+    nBodies = UBound(vBodies) - LBound(vBodies) + 1
+    For i = LBound(vBodies) To UBound(vBodies)
+        Set swBody = vBodies(i)
+        bodyName = BodyDisplayName(swBody, i - LBound(vBodies) + 1)
+        AppendDrivingGearComboEntry partTitle, bodyName
+    Next i
+End Sub
+
+Private Sub AddMacroGearsFromAssemblyToCombo(ByVal swAssyDoc As SldWorks.ModelDoc2)
+    Dim swAssy As SldWorks.AssemblyDoc
+    Dim vComps As Variant
+    Dim swComp As SldWorks.Component2
+    Dim swPartDoc As SldWorks.ModelDoc2
+    Dim i As Long
+    Dim compName As String
+    Dim partTitle As String
+    Dim modMM As Double
+    Dim z1 As Long
+    Dim pa As Double
+    Dim w As Double
+
+    Set swAssy = swAssyDoc
+    vComps = swAssy.GetComponents(False)
+    If IsEmpty(vComps) Then
+        AppendDrivingGearComboEntry swAssyDoc.GetTitle, "(no components)"
+        Exit Sub
+    End If
+
+    For i = LBound(vComps) To UBound(vComps)
+        Set swComp = vComps(i)
+        If swComp Is Nothing Then GoTo NextComp
+        Set swPartDoc = swComp.GetModelDoc2
+        If swPartDoc Is Nothing Then GoTo NextComp
+        If swPartDoc.GetType <> swDocumentTypes_e.swDocPART Then GoTo NextComp
+        If Not ReadGearMetadataFromDoc(swPartDoc, modMM, z1, pa, w) Then GoTo NextComp
+        compName = swComp.Name2
+        partTitle = swPartDoc.GetTitle
+        AppendDrivingGearComboEntry partTitle, compName
+NextComp:
+    Next i
+End Sub
+
+' Rebuild list from active document; returns item count (0 = none / placeholder only)
+Public Function RefreshDrivingGearBodyComboList() As Long
+    Dim swActive As SldWorks.ModelDoc2
+
+    ClearDrivingGearComboList
+    Set swApp = Application.SldWorks
+    Set swActive = swApp.ActiveDoc
+    RefreshDrivingGearBodyComboList = 0
+
+    If swActive Is Nothing Then
+        AppendDrivingGearComboEntry "", "(no document open)"
+        RefreshDrivingGearBodyComboList = GearTrainDrivingComboCount
+        Exit Function
+    End If
+
+    Select Case swActive.GetType
+        Case swDocumentTypes_e.swDocPART
+            AddSolidBodiesFromPartToCombo swActive
+        Case swDocumentTypes_e.swDocASSEMBLY
+            AddMacroGearsFromAssemblyToCombo swActive
+            If GearTrainDrivingComboCount = 0 Then
+                AppendDrivingGearComboEntry swActive.GetTitle, "(no macro-built gear components)"
+            End If
+        Case Else
+            AppendDrivingGearComboEntry swActive.GetTitle, "(open a part or assembly)"
+    End Select
+
+    RefreshDrivingGearBodyComboList = GearTrainDrivingComboCount
+End Function
+
+Public Function DrivingGearComboItemCaption(ByVal index As Long) As String
+    Dim swPartDoc As SldWorks.ModelDoc2
+    Dim modMM As Double
+    Dim z1 As Long
+    Dim pa As Double
+    Dim w As Double
+    Dim hasMeta As Boolean
+    Dim partTitle As String
+    Dim bodyName As String
+
+    DrivingGearComboItemCaption = ""
+    If index < 0 Or index >= GearTrainDrivingComboCount Then Exit Function
+    partTitle = GearTrainDrivingComboPartTitle(index)
+    bodyName = GearTrainDrivingComboBodyName(index)
+    If partTitle = "" Or Left$(bodyName, 1) = "(" Then
+        DrivingGearComboItemCaption = bodyName
+        Exit Function
+    End If
+    Set swPartDoc = FindOpenPartDocumentByTitle(partTitle)
+    hasMeta = False
+    If Not swPartDoc Is Nothing Then hasMeta = ReadGearMetadataFromDoc(swPartDoc, modMM, z1, pa, w)
+    DrivingGearComboItemCaption = DrivingGearComboDisplayText(partTitle, bodyName, hasMeta, z1, modMM)
+End Function
+
+Public Function ApplyDrivingGearFromComboIndex(ByVal index As Long) As Boolean
+    Dim swPartDoc As SldWorks.ModelDoc2
+    Dim partTitle As String
+    Dim bodyName As String
+    Dim modMM As Double
+    Dim z1 As Long
+    Dim pa As Double
+    Dim w As Double
+
+    ApplyDrivingGearFromComboIndex = False
+    If index < 0 Or index >= GearTrainDrivingComboCount Then Exit Function
+
+    partTitle = GearTrainDrivingComboPartTitle(index)
+    bodyName = GearTrainDrivingComboBodyName(index)
+    If partTitle = "" Or Left$(bodyName, 1) = "(" Then Exit Function
+
+    Set swPartDoc = FindOpenPartDocumentByTitle(partTitle)
+    If swPartDoc Is Nothing Then Exit Function
+    If Not ReadGearMetadataFromDoc(swPartDoc, modMM, z1, pa, w) Then Exit Function
+
+    GearTrainDrivingPartTitle = partTitle
+    GearTrainDrivingBodyLabel = bodyName
+    GearTrainDrivingModuleMM = modMM
+    GearTrainDrivingTeeth = z1
+    GearTrainDrivingPressureDeg = pa
+    GearTrainDrivingWidthMM = w
+    ApplyDrivingGearFromComboIndex = True
+    DebugPrint "Driving gear from list: " & GearTrainDrivingPartTitle & " / " & GearTrainDrivingBodyLabel & " z=" & z1
+End Function
+
+Public Function GetPartDocFromSelectedBody(ByVal swBody As SldWorks.Body2) As SldWorks.ModelDoc2
+    On Error Resume Next
+    Set GetPartDocFromSelectedBody = Nothing
+    If swBody Is Nothing Then Exit Function
+    If Not swDoc Is Nothing Then
+        If swDoc.GetType = swDocumentTypes_e.swDocPART Then
+            Set GetPartDocFromSelectedBody = swDoc
+        End If
+    End If
+    On Error GoTo 0
+End Function
+
+Public Function PickDrivingGearBodyFromSelection() As Boolean
+    Dim swBody As SldWorks.Body2
+    Dim swFace As SldWorks.Face2
+    Dim swComp As SldWorks.Component2
+    Dim swPartDoc As SldWorks.ModelDoc2
+    Dim modMM As Double
+    Dim z1 As Long
+    Dim pa As Double
+    Dim w As Double
+    Dim selCount As Long
+    Dim selType As Long
+
+    PickDrivingGearBodyFromSelection = False
+    Set swApp = Application.SldWorks
+    Set swDoc = swApp.ActiveDoc
+    If swDoc Is Nothing Then Exit Function
+    Set swSelMgr = swDoc.SelectionManager
+    selCount = swSelMgr.GetSelectedObjectCount2(-1)
+    If selCount < 1 Then Exit Function
+
+    selType = swSelMgr.GetSelectedObjectType3(1, -1)
+    Set swPartDoc = Nothing
+    Set swBody = Nothing
+
+    Select Case selType
+        Case swSelectType_e.swSelSOLIDBODIES
+            Set swBody = swSelMgr.GetSelectedObject6(1, -1)
+            If Not swBody Is Nothing Then Set swPartDoc = swBody.GetParent
+        Case swSelectType_e.swSelFACES
+            Set swFace = swSelMgr.GetSelectedObject6(1, -1)
+            If Not swFace Is Nothing Then
+                Set swBody = swFace.GetBody
+                If Not swBody Is Nothing Then Set swPartDoc = swBody.GetParent
+            End If
+        Case swSelectType_e.swSelCOMPONENTS
+            Set swComp = swSelMgr.GetSelectedObject6(1, -1)
+            If Not swComp Is Nothing Then Set swPartDoc = swComp.GetModelDoc2
+        Case Else
+            Exit Function
+    End Select
+
+    If swPartDoc Is Nothing Then Exit Function
+    If swPartDoc.GetType <> swDocumentTypes_e.swDocPART Then Exit Function
+    If Not ReadGearMetadataFromDoc(swPartDoc, modMM, z1, pa, w) Then Exit Function
+
+    GearTrainDrivingPartTitle = swPartDoc.GetTitle
+    GearTrainDrivingBodyLabel = "Solid Body"
+    GearTrainDrivingModuleMM = modMM
+    GearTrainDrivingTeeth = z1
+    GearTrainDrivingPressureDeg = pa
+    GearTrainDrivingWidthMM = w
+    PickDrivingGearBodyFromSelection = True
+    DebugPrint "Picked driving gear: " & GearTrainDrivingPartTitle & " z=" & z1 & " m=" & modMM
+End Function
+
+Public Function ApplyDrivenGearInputsFromDrivingGear() As Boolean
+    ApplyDrivenGearInputsFromDrivingGear = False
+    If GearTrainDrivingTeeth <= 0 Or GearTrainDrivingModuleMM <= 0 Then Exit Function
+
+    GearGeom.PressureAngleDeg = GearTrainDrivingPressureDeg
+    GearGeom.ModuleMM = GearTrainDrivingModuleMM
+    If GearTrainDrivingWidthMM > 0 Then GearGeom.WidthMM = GearTrainDrivingWidthMM
+
+    GearTrainCenterDistanceMM = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, GearGeom.NumTeeth)
+    ApplyDrivenGearInputsFromDrivingGear = True
+    DebugPrint "Driven gear inherits m=" & GearGeom.ModuleMM & " pa=" & GearGeom.PressureAngleDeg & _
+        " C=" & Format(GearTrainCenterDistanceMM, "0.###") & " mm"
+End Function
+
+' Sketch dimension names (InvoluteGear_*) complement custom properties on the part.
+Public Sub NameGearDimensionOnCircle(ByVal swCircle As SldWorks.SketchSegment, ByVal dimName As String, ByVal radiusMM As Double)
+    On Error Resume Next
+    If swCircle Is Nothing Then Exit Sub
+    swCircle.Select4 False, Nothing
+    On Error GoTo 0
+End Sub
 
 ' --- Optional debug entry points (do not run from SolidWorks macro list for normal use) ---
 ' Normal flow: UserForm1 -> cbGenerate -> GenerateGear (creates NewPart automatically)
