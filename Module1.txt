@@ -110,8 +110,54 @@ Public Sub SyncGearTrainLayoutCenterFromForm()
     On Error GoTo 0
 End Sub
 
+Private Function GetGearBodyCenterFromBodyBoxM(ByVal swBody As SldWorks.Body2, ByRef xM As Double, ByRef yM As Double) As Boolean
+    Dim vBox As Variant
+    On Error Resume Next
+    GetGearBodyCenterFromBodyBoxM = False
+    xM = 0#: yM = 0#
+    If swBody Is Nothing Then Exit Function
+    vBox = swBody.GetBodyBox()
+    If Not IsArray(vBox) Then Exit Function
+    If UBound(vBox) < 5 Then Exit Function
+    xM = (vBox(0) + vBox(3)) / 2#
+    yM = (vBox(1) + vBox(4)) / 2#
+    GetGearBodyCenterFromBodyBoxM = True
+    On Error GoTo 0
+End Function
+
+' Centre of a macro gear on the Front sketch plane — axis feature, body box, then largest cylinder (metres)
+Public Function GetGearBodyCenterOnFrontPlaneM(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal bodyLabel As String, _
+    ByRef xM As Double, ByRef yM As Double) As Boolean
+    Dim swBody As SldWorks.Body2
+    Dim swAxisFeat As SldWorks.Feature
+    Dim axisName As String
+
+    GetGearBodyCenterOnFrontPlaneM = False
+    xM = 0#: yM = 0#
+    If swPartDoc Is Nothing Or bodyLabel = "" Then Exit Function
+
+    axisName = BuildGearAxisFeatureNameFromBodyLabel(bodyLabel)
+    If axisName <> "" Then
+        Set swAxisFeat = FindRefAxisFeatureByName(axisName, swPartDoc)
+        If GetRefAxisPointOnFrontPlaneM(swAxisFeat, xM, yM) Then
+            GetGearBodyCenterOnFrontPlaneM = True
+            Exit Function
+        End If
+    End If
+
+    Set swBody = FindSolidBodyByName(swPartDoc, bodyLabel)
+    If swBody Is Nothing Then Exit Function
+
+    If GetGearBodyCenterFromBodyBoxM(swBody, xM, yM) Then
+        GetGearBodyCenterOnFrontPlaneM = True
+        Exit Function
+    End If
+
+    GetGearBodyCenterOnFrontPlaneM = GetGearBodyCylindricalCenterOnFrontPlaneM(swPartDoc, bodyLabel, xM, yM)
+End Function
+
 ' Cylindrical face centre of a macro gear body on the Front sketch plane (metres)
-Public Function GetGearBodyCylindricalCenterOnFrontPlaneM(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal bodyLabel As String, _
+Private Function GetGearBodyCylindricalCenterOnFrontPlaneM(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal bodyLabel As String, _
     ByRef xM As Double, ByRef yM As Double) As Boolean
     Dim swBody As SldWorks.Body2
     Dim vFaces As Variant
@@ -160,7 +206,6 @@ End Function
 
 Private Function GetDrivingGearCenterOnFrontPlaneM(ByRef xM As Double, ByRef yM As Double) As Boolean
     Dim swPartDoc As SldWorks.ModelDoc2
-    Dim swAxisFeat As SldWorks.Feature
 
     GetDrivingGearCenterOnFrontPlaneM = False
     xM = 0#: yM = 0#
@@ -169,26 +214,23 @@ Private Function GetDrivingGearCenterOnFrontPlaneM(ByRef xM As Double, ByRef yM 
     Set swPartDoc = FindOpenPartDocumentByTitle(GearTrainDrivingPartTitle)
     If swPartDoc Is Nothing Then Set swPartDoc = swDoc
 
-    If GetGearBodyCylindricalCenterOnFrontPlaneM(swPartDoc, GearTrainDrivingBodyLabel, xM, yM) Then
-        GetDrivingGearCenterOnFrontPlaneM = True
-        Exit Function
-    End If
+    GetDrivingGearCenterOnFrontPlaneM = GetGearBodyCenterOnFrontPlaneM(swPartDoc, GearTrainDrivingBodyLabel, xM, yM)
+End Function
 
-    ' Fallback: ref axis named for the driving body (origin of axis line on Front plane)
-    If GearTrainDrivingAxisName <> "" Then
-        Set swAxisFeat = FindRefAxisFeatureByName(GearTrainDrivingAxisName, swPartDoc)
-        If Not swAxisFeat Is Nothing Then
-            If GetRefAxisPointOnFrontPlaneM(swAxisFeat, xM, yM) Then
-                GetDrivingGearCenterOnFrontPlaneM = True
-            End If
-        End If
+' Bearing (rad) of ray from part origin through the driving gear centre; mesh angle 0 = along this ray
+Private Function GetDrivingGearInlineBearingRad(ByVal drvXM As Double, ByVal drvYM As Double) As Double
+    If Abs(drvXM) < 0.0000000001 And Abs(drvYM) < 0.0000000001 Then
+        GetDrivingGearInlineBearingRad = 0#
+    Else
+        GetDrivingGearInlineBearingRad = Atn2(drvYM, drvXM)
     End If
 End Function
 
-' Point on the ref axis closest to the Front plane sketch (Z ~ 0)
+' Point on ref axis at Front sketch plane (Z ~ 0); gear axes are normal to Front
 Private Function GetRefAxisPointOnFrontPlaneM(ByVal swAxisFeat As SldWorks.Feature, ByRef xM As Double, ByRef yM As Double) As Boolean
     Dim swAxis As Object
     Dim params As Variant
+    Dim dirZ As Double
     On Error Resume Next
     GetRefAxisPointOnFrontPlaneM = False
     xM = 0#: yM = 0#
@@ -197,7 +239,14 @@ Private Function GetRefAxisPointOnFrontPlaneM(ByVal swAxisFeat As SldWorks.Featu
     If swAxis Is Nothing Then Exit Function
     params = swAxis.GetRefAxisParams
     If IsArray(params) Then
-        If UBound(params) >= 2 Then
+        If UBound(params) >= 5 Then
+            dirZ = Abs(params(5))
+            If dirZ > 0.85 Then
+                xM = params(0)
+                yM = params(1)
+                GetRefAxisPointOnFrontPlaneM = True
+            End If
+        ElseIf UBound(params) >= 2 Then
             xM = params(0)
             yM = params(1)
             GetRefAxisPointOnFrontPlaneM = True
@@ -214,6 +263,8 @@ Public Sub SetGearTrainSketchOffsetFromLayout()
     Dim drvYM As Double
     Dim vecXM As Double
     Dim vecYM As Double
+    Dim inlineRad As Double
+    Dim layoutRad As Double
 
     If GearTrainRole <> GEAR_ROLE_DRIVEN Then
         ResetGearSketchOffset
@@ -222,18 +273,25 @@ Public Sub SetGearTrainSketchOffsetFromLayout()
     cMM = GetGearTrainLayoutCenterDistanceMM()
     cM = cMM / MM_PER_M
     aRad = GearTrainMeshAngleDeg * Pi / 180#
-    vecXM = cM * Cos(aRad)
-    vecYM = cM * Sin(aRad)
 
     If GetDrivingGearCenterOnFrontPlaneM(drvXM, drvYM) Then
+        ' Mesh angle 0 = inline: continue outward along line origin -> driving gear centre
+        inlineRad = GetDrivingGearInlineBearingRad(drvXM, drvYM)
+        layoutRad = inlineRad + aRad
+        vecXM = cM * Cos(layoutRad)
+        vecYM = cM * Sin(layoutRad)
         mSketchOffsetXM = drvXM + vecXM
         mSketchOffsetYM = drvYM + vecYM
-        DebugPrint "Driven layout: driving """ & GearTrainDrivingBodyLabel & """ centre (m)=" & Format(drvXM, "0.####") & ", " & Format(drvYM, "0.####") & _
-            " + C=" & Format(cMM, "0.###") & " mm @ " & Format(GearTrainMeshAngleDeg, "0.###") & " deg -> (" & Format(mSketchOffsetXM * MM_PER_M, "0.###") & ", " & Format(mSketchOffsetYM * MM_PER_M, "0.###") & ") mm"
+        DebugPrint "Driven layout: driving """ & GearTrainDrivingBodyLabel & """ centre (mm)=" & Format(drvXM * MM_PER_M, "0.###") & ", " & Format(drvYM * MM_PER_M, "0.###") & _
+            " inline=" & Format(inlineRad * 180# / Pi, "0.###") & " deg + mesh=" & Format(GearTrainMeshAngleDeg, "0.###") & _
+            " deg C=" & Format(cMM, "0.###") & " -> (" & Format(mSketchOffsetXM * MM_PER_M, "0.###") & ", " & Format(mSketchOffsetYM * MM_PER_M, "0.###") & ") mm"
     Else
+        layoutRad = aRad
+        vecXM = cM * Cos(layoutRad)
+        vecYM = cM * Sin(layoutRad)
         mSketchOffsetXM = vecXM
         mSketchOffsetYM = vecYM
-        DebugPrint "Driven layout: driving centre unknown — offset from origin only (m)=" & Format(mSketchOffsetXM, "0.####") & ", " & Format(mSketchOffsetYM, "0.####") & _
+        DebugPrint "Driven layout: driving centre unknown — offset from origin only (mm)=" & Format(mSketchOffsetXM * MM_PER_M, "0.###") & ", " & Format(mSketchOffsetYM * MM_PER_M, "0.###") & _
             " (C=" & Format(cMM, "0.###") & " mm, body=" & GearTrainDrivingBodyLabel & ")"
     End If
 End Sub

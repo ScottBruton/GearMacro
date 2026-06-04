@@ -14,7 +14,7 @@
 '                                  Bodies named ""teethT pitchDia"" (e.g. 9T 11.25); matching ref axis ""9T 11.25 Axis""
 '   tbDrivingGearBody TextBox      Optional summary; Locked=True
 '   btnRefreshDrivingGear CommandButton Caption "Refresh list" (or keep btnPickDrivingBody name)
-'   lblMeshAngle     Label         Caption "Mesh angle (deg, 0=inline):"
+'   lblMeshAngle     Label         Caption "Mesh angle (deg, 0=inline with driving gear):"
 '   tbMeshAngle      TextBox       default "0"
 '   lblTrainCenter   Label         Caption "Centre distance:"
 '   tbTrainCenter    TextBox       Locked=True (read-only, shows C = m(z1+z2)/2)
