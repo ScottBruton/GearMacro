@@ -73,6 +73,8 @@ Public GearTrainRole As Long
 Public GearTrainMeshAngleDeg As Double
 Public GearTrainDrivingPartTitle As String
 Public GearTrainDrivingBodyLabel As String
+' Ref axis feature name for the selected driving body (e.g. "9T 11.25 Axis")
+Public GearTrainDrivingAxisName As String
 Public GearTrainDrivingModuleMM As Double
 Public GearTrainDrivingTeeth As Long
 Public GearTrainDrivingPressureDeg As Double
@@ -101,6 +103,7 @@ Sub main()
     GearTrainMeshAngleDeg = 0#
     GearTrainDrivingPartTitle = ""
     GearTrainDrivingBodyLabel = ""
+    GearTrainDrivingAxisName = ""
     GearTrainLayoutCenterDistanceMM = 0#
     Load UserForm1
     gbGearFormOpen = True
@@ -146,6 +149,7 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
         End If
         CalculateGearGeometry
         Set swDoc = FindOpenPartDocumentByTitle(GearTrainDrivingPartTitle)
+        SyncDrivingGearAxisReference swDoc
         If swDoc Is Nothing Then
             MsgBox "Could not open the driving gear part: " & GearTrainDrivingPartTitle, vbCritical
             Exit Sub
@@ -183,6 +187,7 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
     DebugPrint "=== GenerateGear start (blank+cut+pattern) z=" & GearGeom.NumTeeth & " m=" & GearGeom.ModuleMM & " ==="
 
     SyncGearTrainLayoutCenterFromForm
+    ResetGearBuildFeatureRefs
     ResetGearSketchOffset
     SetGearTrainSketchOffsetFromLayout
     CaptureSolidBodyCountBeforeGearBuild
@@ -214,10 +219,12 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
     End If
 
     NameGearSolidBodyAfterBuild
+    NameGearAxisForCurrentBuild
     StoreGearMetadataOnPart
     If GearTrainRole = GEAR_ROLE_DRIVEN Then
         DebugPrint "Gear train driven layout: C=" & Format(GetGearTrainLayoutCenterDistanceMM(), "0.###") & _
-            " mm angle=" & Format(GearTrainMeshAngleDeg, "0.###") & " deg from driving " & GearTrainDrivingPartTitle
+            " mm angle=" & Format(GearTrainMeshAngleDeg, "0.###") & " deg from driving " & GearTrainDrivingPartTitle & _
+            " axis=" & GearTrainDrivingAxisName
     End If
 
     swDoc.ViewZoomtofit2

@@ -40,6 +40,9 @@ Public Const GEAR_PROP_WIDTH As String = "InvoluteGear_Width"
 Public Const GEAR_PROP_PITCH_DIA As String = "InvoluteGear_PitchDiameter"
 Public Const GEAR_PROP_ADDENDUM_DIA As String = "InvoluteGear_AddendumDiameter"
 
+' Ref axis feature name = solid body name + suffix (avoids SW tree name clashes with the body)
+Public Const GEAR_AXIS_NAME_SUFFIX As String = " Axis"
+
 Public Sub DebugPrint(ByVal msg As String)
     Debug.Print msg
     DebugLog = DebugLog & msg & vbCrLf
@@ -53,6 +56,23 @@ Public Sub ResetGearSketchOffset()
     mPatternAxisSketchName = ""
     Set mPatternAxisSegment = Nothing
     mDrivenPatternUsesBossFace = False
+End Sub
+
+' Clear feature refs from a prior GenerateGear run (avoid reusing last driven gear axis/cut)
+Public Sub ResetGearBuildFeatureRefs()
+    mAxisName = ""
+    mFrontPlaneName = ""
+    Set swGearAxisFeat = Nothing
+    Set swAddendumExtrudeFeat = Nothing
+    Set swToothGapSketchFeat = Nothing
+    Set swToothCutFeat = Nothing
+    Set swPatternFeat = Nothing
+    Set swCombineFeat = Nothing
+    Set swFrontPlaneFeat = Nothing
+    Set swInvoluteSpline = Nothing
+    Set swMirroredInvoluteSpline = Nothing
+    Set swTipLandArc = Nothing
+    Set swRootArc = Nothing
 End Sub
 
 Public Function GetGearTrainLayoutCenterDistanceMM() As Double
@@ -90,10 +110,111 @@ Public Sub SyncGearTrainLayoutCenterFromForm()
     On Error GoTo 0
 End Sub
 
+' Cylindrical face centre of a macro gear body on the Front sketch plane (metres)
+Public Function GetGearBodyCylindricalCenterOnFrontPlaneM(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal bodyLabel As String, _
+    ByRef xM As Double, ByRef yM As Double) As Boolean
+    Dim swBody As SldWorks.Body2
+    Dim vFaces As Variant
+    Dim swFace As SldWorks.Face2
+    Dim swSurf As SldWorks.Surface
+    Dim cylParams As Variant
+    Dim bestR As Double
+    Dim r As Double
+    Dim i As Long
+
+    GetGearBodyCylindricalCenterOnFrontPlaneM = False
+    xM = 0#: yM = 0#
+    If swPartDoc Is Nothing Or bodyLabel = "" Then Exit Function
+
+    Set swBody = FindSolidBodyByName(swPartDoc, bodyLabel)
+    If swBody Is Nothing Then Exit Function
+
+    On Error Resume Next
+    vFaces = swBody.GetFaces
+    On Error GoTo 0
+    If Not IsArray(vFaces) Then Exit Function
+
+    bestR = 0#
+    For i = LBound(vFaces) To UBound(vFaces)
+        Set swFace = vFaces(i)
+        If swFace Is Nothing Then GoTo NextFace
+        Set swSurf = swFace.GetSurface
+        If swSurf Is Nothing Then GoTo NextFace
+        If swSurf.IsCylinder() Then
+            cylParams = swSurf.CylinderParams
+            If IsArray(cylParams) Then
+                If UBound(cylParams) >= 6 Then
+                    r = cylParams(6)
+                    If r > bestR Then
+                        bestR = r
+                        xM = cylParams(0)
+                        yM = cylParams(1)
+                        GetGearBodyCylindricalCenterOnFrontPlaneM = True
+                    End If
+                End If
+            End If
+        End If
+NextFace:
+    Next i
+End Function
+
+Private Function GetDrivingGearCenterOnFrontPlaneM(ByRef xM As Double, ByRef yM As Double) As Boolean
+    Dim swPartDoc As SldWorks.ModelDoc2
+    Dim swAxisFeat As SldWorks.Feature
+
+    GetDrivingGearCenterOnFrontPlaneM = False
+    xM = 0#: yM = 0#
+    If GearTrainDrivingBodyLabel = "" Then Exit Function
+
+    Set swPartDoc = FindOpenPartDocumentByTitle(GearTrainDrivingPartTitle)
+    If swPartDoc Is Nothing Then Set swPartDoc = swDoc
+
+    If GetGearBodyCylindricalCenterOnFrontPlaneM(swPartDoc, GearTrainDrivingBodyLabel, xM, yM) Then
+        GetDrivingGearCenterOnFrontPlaneM = True
+        Exit Function
+    End If
+
+    ' Fallback: ref axis named for the driving body (origin of axis line on Front plane)
+    If GearTrainDrivingAxisName <> "" Then
+        Set swAxisFeat = FindRefAxisFeatureByName(GearTrainDrivingAxisName, swPartDoc)
+        If Not swAxisFeat Is Nothing Then
+            If GetRefAxisPointOnFrontPlaneM(swAxisFeat, xM, yM) Then
+                GetDrivingGearCenterOnFrontPlaneM = True
+            End If
+        End If
+    End If
+End Function
+
+' Point on the ref axis closest to the Front plane sketch (Z ~ 0)
+Private Function GetRefAxisPointOnFrontPlaneM(ByVal swAxisFeat As SldWorks.Feature, ByRef xM As Double, ByRef yM As Double) As Boolean
+    Dim swAxis As Object
+    Dim params As Variant
+    On Error Resume Next
+    GetRefAxisPointOnFrontPlaneM = False
+    xM = 0#: yM = 0#
+    If swAxisFeat Is Nothing Then Exit Function
+    Set swAxis = swAxisFeat.GetSpecificFeature2
+    If swAxis Is Nothing Then Exit Function
+    params = swAxis.GetRefAxisParams
+    If IsArray(params) Then
+        If UBound(params) >= 2 Then
+            xM = params(0)
+            yM = params(1)
+            GetRefAxisPointOnFrontPlaneM = True
+        End If
+    End If
+    On Error GoTo 0
+End Function
+
 Public Sub SetGearTrainSketchOffsetFromLayout()
     Dim cM As Double
     Dim aRad As Double
     Dim cMM As Double
+    Dim drvXM As Double
+    Dim drvYM As Double
+    Dim vecXM As Double
+    Dim vecYM As Double
+
     If GearTrainRole <> GEAR_ROLE_DRIVEN Then
         ResetGearSketchOffset
         Exit Sub
@@ -101,10 +222,20 @@ Public Sub SetGearTrainSketchOffsetFromLayout()
     cMM = GetGearTrainLayoutCenterDistanceMM()
     cM = cMM / MM_PER_M
     aRad = GearTrainMeshAngleDeg * Pi / 180#
-    mSketchOffsetXM = cM * Cos(aRad)
-    mSketchOffsetYM = cM * Sin(aRad)
-    DebugPrint "Driven gear sketch center offset (m): " & Format(mSketchOffsetXM, "0.####") & ", " & Format(mSketchOffsetYM, "0.####") & _
-        " (C=" & Format(cMM, "0.###") & " mm)"
+    vecXM = cM * Cos(aRad)
+    vecYM = cM * Sin(aRad)
+
+    If GetDrivingGearCenterOnFrontPlaneM(drvXM, drvYM) Then
+        mSketchOffsetXM = drvXM + vecXM
+        mSketchOffsetYM = drvYM + vecYM
+        DebugPrint "Driven layout: driving """ & GearTrainDrivingBodyLabel & """ centre (m)=" & Format(drvXM, "0.####") & ", " & Format(drvYM, "0.####") & _
+            " + C=" & Format(cMM, "0.###") & " mm @ " & Format(GearTrainMeshAngleDeg, "0.###") & " deg -> (" & Format(mSketchOffsetXM * MM_PER_M, "0.###") & ", " & Format(mSketchOffsetYM * MM_PER_M, "0.###") & ") mm"
+    Else
+        mSketchOffsetXM = vecXM
+        mSketchOffsetYM = vecYM
+        DebugPrint "Driven layout: driving centre unknown — offset from origin only (m)=" & Format(mSketchOffsetXM, "0.####") & ", " & Format(mSketchOffsetYM, "0.####") & _
+            " (C=" & Format(cMM, "0.###") & " mm, body=" & GearTrainDrivingBodyLabel & ")"
+    End If
 End Sub
 
 Public Sub CaptureSolidBodyCountBeforeGearBuild()
@@ -122,6 +253,75 @@ End Sub
 Public Function BuildGearBodyName() As String
     BuildGearBodyName = CStr(GearGeom.NumTeeth) & "T " & FormatPitchDiameterForName(GearGeom.PitchDiameterMM)
 End Function
+
+Public Function BuildGearAxisFeatureName() As String
+    BuildGearAxisFeatureName = BuildGearBodyName() & GEAR_AXIS_NAME_SUFFIX
+End Function
+
+Public Function BuildGearAxisFeatureNameFromBodyLabel(ByVal bodyLabel As String) As String
+    bodyLabel = Trim$(bodyLabel)
+    If bodyLabel = "" Then
+        BuildGearAxisFeatureNameFromBodyLabel = ""
+    Else
+        BuildGearAxisFeatureNameFromBodyLabel = bodyLabel & GEAR_AXIS_NAME_SUFFIX
+    End If
+End Function
+
+Public Function FindRefAxisFeatureByName(ByVal axisName As String, Optional ByVal swPartDoc As SldWorks.ModelDoc2) As SldWorks.Feature
+    Dim swP As SldWorks.PartDoc
+    On Error Resume Next
+    Set FindRefAxisFeatureByName = Nothing
+    If axisName = "" Then Exit Function
+    If swPartDoc Is Nothing Then
+        Set swP = swPart
+    ElseIf swPartDoc.GetType = swDocumentTypes_e.swDocPART Then
+        Set swP = swPartDoc
+    Else
+        Exit Function
+    End If
+    If swP Is Nothing Then Exit Function
+    Set FindRefAxisFeatureByName = swP.FeatureByName(axisName)
+    If Not FindRefAxisFeatureByName Is Nothing Then
+        If Not FeatureIsRefAxis(FindRefAxisFeatureByName) Then Set FindRefAxisFeatureByName = Nothing
+    End If
+    On Error GoTo 0
+End Function
+
+Public Sub ApplyGearAxisFeatureName(ByVal swAxisFeat As SldWorks.Feature, ByVal axisName As String)
+    On Error Resume Next
+    If swAxisFeat Is Nothing Or axisName = "" Then Exit Sub
+    swAxisFeat.Name = axisName
+    mAxisName = axisName
+    Set swGearAxisFeat = swAxisFeat
+    DebugPrint "Named gear ref axis: " & axisName
+    On Error GoTo 0
+End Sub
+
+Public Sub NameGearAxisForCurrentBuild()
+    Dim axisName As String
+    axisName = BuildGearAxisFeatureName()
+    If axisName = "" Then Exit Sub
+    If swGearAxisFeat Is Nothing And mAxisName <> "" Then
+        Set swGearAxisFeat = FindRefAxisFeatureByName(mAxisName)
+    End If
+    If swGearAxisFeat Is Nothing Then
+        Set swGearAxisFeat = FindRefAxisFeatureByName(axisName)
+    End If
+    If swGearAxisFeat Is Nothing Then Exit Sub
+    ApplyGearAxisFeatureName swGearAxisFeat, axisName
+End Sub
+
+Public Sub SyncDrivingGearAxisReference(ByVal swPartDoc As SldWorks.ModelDoc2)
+    Dim ft As SldWorks.Feature
+    GearTrainDrivingAxisName = BuildGearAxisFeatureNameFromBodyLabel(GearTrainDrivingBodyLabel)
+    If GearTrainDrivingAxisName = "" Then Exit Sub
+    Set ft = FindRefAxisFeatureByName(GearTrainDrivingAxisName, swPartDoc)
+    If ft Is Nothing Then
+        DebugPrint "Driving gear axis not found (generate/rename driving gear first): " & GearTrainDrivingAxisName
+    Else
+        DebugPrint "Driving gear axis reference: " & GearTrainDrivingAxisName
+    End If
+End Sub
 
 Private Function FormatPitchDiameterForName(ByVal pitchDiaMM As Double) As String
     Dim s As String
@@ -414,7 +614,7 @@ AxisOk:
     Set swGearAxisFeat = FindLastRefAxisFeature()
     If swGearAxisFeat Is Nothing Then Set swGearAxisFeat = swSelMgr.GetSelectedObject5(1)
     If swGearAxisFeat Is Nothing Then GoTo AxisFail
-    mAxisName = swGearAxisFeat.Name
+    NameGearAxisForCurrentBuild
     ClearSWSelection
     CreateGearAxis = True
     DebugPrint "CreateGearAxis OK: " & mAxisName
@@ -449,16 +649,8 @@ Private Function CreateDrivenGearRefAxisAtLayoutCenter() As Boolean
     mPatternAxisSketchName = ""
     Set mPatternAxisSegment = Nothing
 
-    Dim swExisting As SldWorks.Feature
-    Set swExisting = FindSecondRefAxisFeature()
-    If Not swExisting Is Nothing Then
-        Set swGearAxisFeat = swExisting
-        mAxisName = swGearAxisFeat.Name
-        CreateDrivenGearRefAxisAtLayoutCenter = True
-        DebugPrint "CreateDrivenGearRefAxisAtLayoutCenter: reuse " & mAxisName & " (2nd ref axis in tree)"
-        Exit Function
-    End If
-
+    ' Do not reuse FindSecondRefAxisFeature — after the first driven gear that is the previous
+    ' driven layout axis, not the driving gear or the new driven centre.
     Set swGearAxisFeat = Nothing
     If CreateGearAxisAtSketchCenter() Then
         CreateDrivenGearRefAxisAtLayoutCenter = True
@@ -557,7 +749,7 @@ Private Function CreateGearAxisAtSketchCenter() As Boolean
         Exit Function
     End If
 
-    mAxisName = swGearAxisFeat.Name
+    NameGearAxisForCurrentBuild
     mUseSketchCenterlineAsAxis = False
     CreateGearAxisAtSketchCenter = True
     DebugPrint "CreateGearAxisAtSketchCenter OK: " & mAxisName & " (normal to Front) at " & Format(mSketchOffsetXM * MM_PER_M, "0.###") & " mm"
@@ -626,7 +818,7 @@ Public Function TryCreateDrivenRefAxisFromBossFace() As Boolean
     If axisCountAfter > axisCountBefore Then
         Set swGearAxisFeat = FindLastRefAxisFeature()
         If Not swGearAxisFeat Is Nothing Then
-            mAxisName = swGearAxisFeat.Name
+            NameGearAxisForCurrentBuild
             mDrivenPatternUsesBossFace = False
             TryCreateDrivenRefAxisFromBossFace = True
             DebugPrint "TryCreateDrivenRefAxisFromBossFace OK: " & mAxisName
@@ -1557,9 +1749,16 @@ Public Function CircularPatternTooth() As Boolean
 
     stepDetail = "resolve refs"
     mUseSketchCenterlineAsAxis = False
-    If swGearAxisFeat Is Nothing And mAxisName <> "" Then Set swGearAxisFeat = FindFeatureByNameSafe(mAxisName)
-    If swGearAxisFeat Is Nothing And GearTrainRole = GEAR_ROLE_DRIVEN Then Set swGearAxisFeat = FindSecondRefAxisFeature()
-    If swGearAxisFeat Is Nothing Then Set swGearAxisFeat = FindLastRefAxisFeature()
+    If swGearAxisFeat Is Nothing Then
+        Set swGearAxisFeat = FindRefAxisFeatureByName(BuildGearAxisFeatureName())
+    End If
+    If swGearAxisFeat Is Nothing And mAxisName <> "" Then
+        Set swGearAxisFeat = FindRefAxisFeatureByName(mAxisName)
+    End If
+    ' Driving gear only: legacy parts may still have Axis1 / unnamed origin axis
+    If swGearAxisFeat Is Nothing And GearTrainRole <> GEAR_ROLE_DRIVEN Then
+        Set swGearAxisFeat = FindLastRefAxisFeature()
+    End If
     ResolveToothCutForPattern
     If swToothCutFeat Is Nothing Then
         DebugPrint "CircularPatternTooth: missing tooth gap cut"
@@ -1568,8 +1767,12 @@ Public Function CircularPatternTooth() As Boolean
     If GearTrainRole = GEAR_ROLE_DRIVEN Then
         RebuildSWPart
         If swGearAxisFeat Is Nothing Or mDrivenPatternUsesBossFace Then TryCreateDrivenRefAxisFromBossFace
-        If swGearAxisFeat Is Nothing And mAxisName <> "" Then Set swGearAxisFeat = FindFeatureByNameSafe(mAxisName)
-        If swGearAxisFeat Is Nothing Then Set swGearAxisFeat = FindSecondRefAxisFeature()
+        If swGearAxisFeat Is Nothing Then
+            Set swGearAxisFeat = FindRefAxisFeatureByName(BuildGearAxisFeatureName())
+        End If
+        If swGearAxisFeat Is Nothing And mAxisName <> "" Then
+            Set swGearAxisFeat = FindRefAxisFeatureByName(mAxisName)
+        End If
     End If
 
     If swGearAxisFeat Is Nothing And mAxisName = "" And FindAddendumCylindricalFace() Is Nothing Then
@@ -2232,8 +2435,10 @@ Public Function ApplyDrivingGearFromComboIndex(ByVal index As Long) As Boolean
     GearTrainDrivingTeeth = z1
     GearTrainDrivingPressureDeg = pa
     GearTrainDrivingWidthMM = w
+    SyncDrivingGearAxisReference swPartDoc
     ApplyDrivingGearFromComboIndex = True
-    DebugPrint "Driving gear from list: " & GearTrainDrivingPartTitle & " / " & GearTrainDrivingBodyLabel & " z=" & z1
+    DebugPrint "Driving gear from list: " & GearTrainDrivingPartTitle & " / " & GearTrainDrivingBodyLabel & _
+        " z=" & z1 & " axis=" & GearTrainDrivingAxisName
 End Function
 
 Public Function GetPartDocFromSelectedBody(ByVal swBody As SldWorks.Body2) As SldWorks.ModelDoc2
@@ -2303,8 +2508,10 @@ Public Function PickDrivingGearBodyFromSelection() As Boolean
     GearTrainDrivingTeeth = z1
     GearTrainDrivingPressureDeg = pa
     GearTrainDrivingWidthMM = w
+    SyncDrivingGearAxisReference swPartDoc
     PickDrivingGearBodyFromSelection = True
-    DebugPrint "Picked driving gear: " & GearTrainDrivingPartTitle & " / " & GearTrainDrivingBodyLabel & " z=" & z1 & " m=" & modMM
+    DebugPrint "Picked driving gear: " & GearTrainDrivingPartTitle & " / " & GearTrainDrivingBodyLabel & _
+        " z=" & z1 & " m=" & modMM & " axis=" & GearTrainDrivingAxisName
 End Function
 
 Public Function ApplyDrivenGearInputsFromDrivingGear() As Boolean

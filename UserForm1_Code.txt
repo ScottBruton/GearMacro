@@ -11,7 +11,7 @@
 '   lblDrivingGear   Label         Caption "Driving gear:"
 '   btnCancel / cbCancel / btnClose — call CloseGearForm (ends main() DoEvents loop)
 '   cboDrivingGearBody ComboBox    Style=2 — macro gears from all open parts
-'                                  Bodies named ""teethT pitchDia"" (e.g. 9T 11.25) or InvoluteGear custom properties
+'                                  Bodies named ""teethT pitchDia"" (e.g. 9T 11.25); matching ref axis ""9T 11.25 Axis""
 '   tbDrivingGearBody TextBox      Optional summary; Locked=True
 '   btnRefreshDrivingGear CommandButton Caption "Refresh list" (or keep btnPickDrivingBody name)
 '   lblMeshAngle     Label         Caption "Mesh angle (deg, 0=inline):"
@@ -440,6 +440,7 @@ Private Sub ApplyDrivingGearFromComboSelection()
     If cb Is Nothing Then Exit Sub
     If cb.ListIndex < 0 Then
         GearTrainDrivingPartTitle = ""
+        GearTrainDrivingAxisName = ""
         UpdateDrivingGearDisplay
         Exit Sub
     End If
@@ -449,6 +450,7 @@ Private Sub ApplyDrivingGearFromComboSelection()
         UpdateGearCalculations
     Else
         GearTrainDrivingPartTitle = ""
+        GearTrainDrivingAxisName = ""
         UpdateDrivingGearDisplay
         SetFormTextBox "tbDrivingGearBody", "(choose a macro-built driving gear from the list)"
         UpdateTrainCenterDistance
