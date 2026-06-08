@@ -8,6 +8,12 @@ Private mFrontPlaneName As String
 Private mAxisName As String
 Private mSketchOffsetXM As Double
 Private mSketchOffsetYM As Double
+Private mBossStartOffsetZM As Double
+Private mCurrentGearIndex As Long
+Private mBlankSketchFeatName As String
+Private mGapSketchFeatName As String
+Private mGapDaConstrCircle As SldWorks.SketchSegment
+Private mGapDdConstrCircle As SldWorks.SketchSegment
 Private mGearSolidBodyCountBefore As Long
 Private mUseSketchCenterlineAsAxis As Boolean
 Private mPatternAxisLineId As String
@@ -21,6 +27,8 @@ Private Const SW_DIM_TYPE_RADIAL As Long = 5
 Private Const SW_END_BLIND As Long = 0
 Private Const SW_END_THROUGH_ALL As Long = 1
 Private Const SW_START_SKETCH_PLANE As Long = 0
+' swStartConditions_e (SW 2021): swStartOffset = 3 (not 1 — that is swStartSurface)
+Private Const SW_START_OFFSET As Long = 3
 
 ' Gear train metadata (custom properties + named sketch dimensions)
 Public Const GEAR_DIM_ADDENDUM_RADIUS As String = "InvoluteGear_Da_Radius"
@@ -40,6 +48,7 @@ Public Const GEAR_PROP_WIDTH As String = "InvoluteGear_Width"
 Public Const GEAR_PROP_PITCH_DIA As String = "InvoluteGear_PitchDiameter"
 Public Const GEAR_PROP_ADDENDUM_DIA As String = "InvoluteGear_AddendumDiameter"
 Public Const GEAR_PROP_IS_INTERNAL As String = "InvoluteGear_IsInternal"
+Public Const GEAR_PROP_GEAR_INDEX As String = "InvoluteGear_Index"
 
 ' Ref axis feature name = solid body name + suffix (avoids SW tree name clashes with the body)
 Public Const GEAR_AXIS_NAME_SUFFIX As String = " Axis"
@@ -52,6 +61,7 @@ End Sub
 Public Sub ResetGearSketchOffset()
     mSketchOffsetXM = 0#
     mSketchOffsetYM = 0#
+    mBossStartOffsetZM = 0#
     mUseSketchCenterlineAsAxis = False
     mPatternAxisLineId = ""
     mPatternAxisSketchName = ""
@@ -74,6 +84,11 @@ Public Sub ResetGearBuildFeatureRefs()
     Set swMirroredInvoluteSpline = Nothing
     Set swTipLandArc = Nothing
     Set swRootArc = Nothing
+    Set mGapDaConstrCircle = Nothing
+    Set mGapDdConstrCircle = Nothing
+    mBlankSketchFeatName = ""
+    mGapSketchFeatName = ""
+    mCurrentGearIndex = 0
 End Sub
 
 Public Function GetGearTrainLayoutCenterDistanceMM() As Double
@@ -124,6 +139,42 @@ Private Function GetGearBodyCenterFromBodyBoxM(ByVal swBody As SldWorks.Body2, B
     yM = (vBox(1) + vBox(4)) / 2#
     GetGearBodyCenterFromBodyBoxM = True
     On Error GoTo 0
+End Function
+
+Private Function GetGearBodyTopZMFromBody(ByVal swBody As SldWorks.Body2) As Double
+    Dim vBox As Variant
+    GetGearBodyTopZMFromBody = 0#
+    On Error Resume Next
+    If swBody Is Nothing Then Exit Function
+    vBox = swBody.GetBodyBox()
+    If IsArray(vBox) And UBound(vBox) >= 5 Then GetGearBodyTopZMFromBody = vBox(5)
+    On Error GoTo 0
+End Function
+
+Private Function GetSelectedBaseGearBodyTopZM() As Double
+    Dim swPartDoc As SldWorks.ModelDoc2
+    Dim swBody As SldWorks.Body2
+
+    GetSelectedBaseGearBodyTopZM = 0#
+    If GearTrainDrivingBodyLabel = "" Then Exit Function
+    Set swPartDoc = FindOpenPartDocumentByTitle(GearTrainDrivingPartTitle)
+    If swPartDoc Is Nothing Then Set swPartDoc = swDoc
+    If swPartDoc Is Nothing Then Exit Function
+    Set swBody = FindSolidBodyByName(swPartDoc, GearTrainDrivingBodyLabel)
+    GetSelectedBaseGearBodyTopZM = GetGearBodyTopZMFromBody(swBody)
+End Function
+
+Private Sub GetGearExtrudeStartParams(ByRef startCond As Long, ByRef startOff As Double)
+    startCond = SW_START_SKETCH_PLANE
+    startOff = 0#
+    If mBossStartOffsetZM > 0.0000000001 Then
+        startCond = SW_START_OFFSET
+        startOff = mBossStartOffsetZM
+    End If
+End Sub
+
+Private Function GearTrainRoleIsDrivenOrStacked() As Boolean
+    GearTrainRoleIsDrivenOrStacked = (GearTrainRole = GEAR_ROLE_DRIVEN Or GearTrainRole = GEAR_ROLE_STACKED)
 End Function
 
 ' Centre of a macro gear on the Front sketch plane — axis feature, body box, then largest cylinder (metres)
@@ -267,6 +318,20 @@ Public Sub SetGearTrainSketchOffsetFromLayout()
     Dim inlineRad As Double
     Dim layoutRad As Double
 
+    If GearTrainRole = GEAR_ROLE_STACKED Then
+        If GetDrivingGearCenterOnFrontPlaneM(drvXM, drvYM) Then
+            mSketchOffsetXM = drvXM
+            mSketchOffsetYM = drvYM
+        Else
+            mSketchOffsetXM = 0#
+            mSketchOffsetYM = 0#
+        End If
+        mBossStartOffsetZM = GetSelectedBaseGearBodyTopZM()
+        DebugPrint "Stacked layout: base """ & GearTrainDrivingBodyLabel & """ centre (mm)=" & _
+            Format(mSketchOffsetXM * MM_PER_M, "0.###") & ", " & Format(mSketchOffsetYM * MM_PER_M, "0.###") & _
+            " boss start Z (mm)=" & Format(mBossStartOffsetZM * MM_PER_M, "0.###")
+        Exit Sub
+    End If
     If GearTrainRole <> GEAR_ROLE_DRIVEN Then
         ResetGearSketchOffset
         Exit Sub
@@ -308,9 +373,333 @@ Public Sub CaptureSolidBodyCountBeforeGearBuild()
     On Error GoTo 0
 End Sub
 
-' Body name: {teeth}T {pitch diameter mm}  e.g. 100T 125  (X in "XT" = tooth count, not letter X)
+Private Function HasGearBodyNamePrefix(ByVal bodyName As String) As Boolean
+    Dim i As Long
+    Dim ch As String
+    HasGearBodyNamePrefix = False
+    bodyName = Trim$(bodyName)
+    If Len(bodyName) < 6 Then Exit Function
+    If UCase$(Left$(bodyName, 4)) <> "GEAR" Then Exit Function
+    i = 5
+    Do While i <= Len(bodyName)
+        ch = Mid$(bodyName, i, 1)
+        If ch >= "0" And ch <= "9" Then
+            i = i + 1
+        Else
+            Exit Do
+        End If
+    Loop
+    HasGearBodyNamePrefix = (i > 5 And Mid$(bodyName, i, 1) = "_")
+End Function
+
+Private Function StripGearBodyNamePrefix(ByVal bodyName As String) As String
+    Dim i As Long
+    Dim ch As String
+    StripGearBodyNamePrefix = Trim$(bodyName)
+    If Not HasGearBodyNamePrefix(StripGearBodyNamePrefix) Then Exit Function
+    i = 5
+    Do While i <= Len(StripGearBodyNamePrefix)
+        ch = Mid$(StripGearBodyNamePrefix, i, 1)
+        If ch >= "0" And ch <= "9" Then
+            i = i + 1
+        Else
+            Exit Do
+        End If
+    Loop
+    If Mid$(StripGearBodyNamePrefix, i, 1) = "_" Then
+        StripGearBodyNamePrefix = Trim$(Mid$(StripGearBodyNamePrefix, i + 1))
+    End If
+End Function
+
+Public Function ParseGearIndexFromBodyName(ByVal bodyName As String) As Long
+    Dim i As Long
+    Dim ch As String
+    Dim digits As String
+    ParseGearIndexFromBodyName = 0
+    bodyName = Trim$(bodyName)
+    If Len(bodyName) < 6 Then Exit Function
+    If UCase$(Left$(bodyName, 4)) <> "GEAR" Then Exit Function
+    i = 5
+    digits = ""
+    Do While i <= Len(bodyName)
+        ch = Mid$(bodyName, i, 1)
+        If ch >= "0" And ch <= "9" Then
+            digits = digits & ch
+            i = i + 1
+        Else
+            Exit Do
+        End If
+    Loop
+    If digits <> "" And Mid$(bodyName, i, 1) = "_" Then ParseGearIndexFromBodyName = CLng(digits)
+End Function
+
+Private Function CountMacroGearsInPart() As Long
+    Dim vBodies As Variant
+    Dim swBody As SldWorks.Body2
+    Dim i As Long
+    Dim pitchDia As Double
+    Dim z As Long
+
+    CountMacroGearsInPart = 0
+    If swPart Is Nothing Then Exit Function
+    vBodies = swPart.GetBodies2(swBodyType_e.swSolidBody, True)
+    If Not IsArray(vBodies) Then Exit Function
+    For i = LBound(vBodies) To UBound(vBodies)
+        Set swBody = vBodies(i)
+        If IsMacroGearBody(swBody, swDoc) Then
+            CountMacroGearsInPart = CountMacroGearsInPart + 1
+        ElseIf HasGearBodyNamePrefix(swBody.Name) Then
+            CountMacroGearsInPart = CountMacroGearsInPart + 1
+        ElseIf TryParseGearBodyName(swBody.Name, pitchDia, z) Then
+            CountMacroGearsInPart = CountMacroGearsInPart + 1
+        End If
+    Next i
+End Function
+
+Public Sub AssignCurrentGearIndex()
+    mCurrentGearIndex = CountMacroGearsInPart() + 1
+    If mCurrentGearIndex < 1 Then mCurrentGearIndex = 1
+    DebugPrint "Current gear index: Gear" & mCurrentGearIndex
+End Sub
+
+Public Function GetCurrentGearIndex() As Long
+    If mCurrentGearIndex < 1 Then mCurrentGearIndex = 1
+    GetCurrentGearIndex = mCurrentGearIndex
+End Function
+
+Private Function GearGlobalVarName(ByVal suffix As String) As String
+    GearGlobalVarName = "gear" & GetCurrentGearIndex() & "_" & suffix
+End Function
+
+Private Function EqQuotedName(ByVal name As String) As String
+    EqQuotedName = Chr(34) & name & Chr(34)
+End Function
+
+Private Function FindEquationIndexByVarName(ByVal swEqnMgr As SldWorks.EquationMgr, ByVal varName As String) As Long
+    Dim i As Long
+    Dim eqLine As String
+    Dim lhs As String
+
+    FindEquationIndexByVarName = -1
+    If swEqnMgr Is Nothing Or varName = "" Then Exit Function
+    On Error Resume Next
+    For i = 0 To swEqnMgr.GetCount - 1
+        eqLine = swEqnMgr.Equation(i)
+        lhs = Trim$(Split(eqLine, "=")(0))
+        If Left$(lhs, 1) = Chr(34) And Right$(lhs, 1) = Chr(34) Then
+            lhs = Mid$(lhs, 2, Len(lhs) - 2)
+        End If
+        If StrComp(lhs, varName, vbTextCompare) = 0 Then
+            FindEquationIndexByVarName = i
+            Exit Function
+        End If
+    Next i
+    On Error GoTo 0
+End Function
+
+Private Function AddOrUpdateGlobalEquation(ByVal varName As String, ByVal valueText As String) As Boolean
+    Dim swEqnMgr As SldWorks.EquationMgr
+    Dim eqLine As String
+    Dim idx As Long
+
+    AddOrUpdateGlobalEquation = False
+    If swPart Is Nothing Or varName = "" Then Exit Function
+    Set swEqnMgr = swPart.GetEquationMgr
+    If swEqnMgr Is Nothing Then Exit Function
+
+    eqLine = EqQuotedName(varName) & " = " & valueText
+    idx = FindEquationIndexByVarName(swEqnMgr, varName)
+    On Error Resume Next
+    If idx >= 0 Then
+        swEqnMgr.Equation(idx) = eqLine
+    Else
+        idx = swEqnMgr.Add2(-1, eqLine, True)
+        If idx < 0 Then Exit Function
+    End If
+    AddOrUpdateGlobalEquation = True
+    DebugPrint "Equation global: " & eqLine
+    On Error GoTo 0
+End Function
+
+Private Function FindEquationIndexByDimRef(ByVal swEqnMgr As SldWorks.EquationMgr, ByVal dimRef As String) As Long
+    Dim i As Long
+    Dim eqLine As String
+    Dim lhs As String
+
+    FindEquationIndexByDimRef = -1
+    If swEqnMgr Is Nothing Or dimRef = "" Then Exit Function
+    On Error Resume Next
+    For i = 0 To swEqnMgr.GetCount - 1
+        eqLine = swEqnMgr.Equation(i)
+        lhs = Trim$(Split(eqLine, "=")(0))
+        If Left$(lhs, 1) = Chr(34) And Right$(lhs, 1) = Chr(34) Then
+            lhs = Mid$(lhs, 2, Len(lhs) - 2)
+        End If
+        If StrComp(lhs, dimRef, vbTextCompare) = 0 Then
+            FindEquationIndexByDimRef = i
+            Exit Function
+        End If
+    Next i
+    On Error GoTo 0
+End Function
+
+Private Function AddOrUpdateDimensionEquation(ByVal dimRef As String, ByVal rhsExpr As String) As Boolean
+    Dim swEqnMgr As SldWorks.EquationMgr
+    Dim eqLine As String
+    Dim idx As Long
+
+    AddOrUpdateDimensionEquation = False
+    If swPart Is Nothing Or dimRef = "" Then Exit Function
+    Set swEqnMgr = swPart.GetEquationMgr
+    If swEqnMgr Is Nothing Then Exit Function
+
+    eqLine = EqQuotedName(dimRef) & " = " & rhsExpr
+    idx = FindEquationIndexByDimRef(swEqnMgr, dimRef)
+    On Error Resume Next
+    If idx >= 0 Then
+        swEqnMgr.Equation(idx) = eqLine
+    Else
+        idx = swEqnMgr.Add2(-1, eqLine, True)
+        If idx < 0 Then Exit Function
+    End If
+    AddOrUpdateDimensionEquation = True
+    DebugPrint "Equation dim: " & eqLine
+    On Error GoTo 0
+End Function
+
+Public Sub CreateGearGlobalVariableEquations()
+    AddOrUpdateGlobalEquation GearGlobalVarName("PressureAngle"), Format(GearGeom.PressureAngleDeg, "0.####")
+    AddOrUpdateGlobalEquation GearGlobalVarName("Module"), Format(GearGeom.ModuleMM, "0.####")
+    AddOrUpdateGlobalEquation GearGlobalVarName("Teeth"), CStr(GearGeom.NumTeeth)
+    AddOrUpdateGlobalEquation GearGlobalVarName("Width"), Format(GearGeom.WidthMM, "0.####")
+End Sub
+
+Private Function BuildGearDiameterEquationRhs(ByVal isAddendum As Boolean) As String
+    Dim qM As String
+    Dim qZ As String
+    qM = EqQuotedName(GearGlobalVarName("Module"))
+    qZ = EqQuotedName(GearGlobalVarName("Teeth"))
+    If GearGeom.IsInternal Then
+        If isAddendum Then
+            BuildGearDiameterEquationRhs = qM & " * (" & qZ & " - 2)"
+        Else
+            BuildGearDiameterEquationRhs = qM & " * (" & qZ & " + 2.5)"
+        End If
+    Else
+        If isAddendum Then
+            BuildGearDiameterEquationRhs = qM & " * (" & qZ & " + 2)"
+        Else
+            BuildGearDiameterEquationRhs = qM & " * (" & qZ & " - 2.5)"
+        End If
+    End If
+End Function
+
+Private Sub LinkSketchDiameterEquation(ByVal dimName As String, ByVal sketchFeatName As String, ByVal isAddendum As Boolean)
+    If sketchFeatName = "" Or dimName = "" Then Exit Sub
+    AddOrUpdateDimensionEquation dimName & "@" & sketchFeatName, BuildGearDiameterEquationRhs(isAddendum)
+End Sub
+
+Private Sub TryLinkFeatureDepthEquation(ByVal featName As String, ByVal dimId As String)
+    If featName = "" Then Exit Sub
+    AddOrUpdateDimensionEquation dimId & "@" & featName, EqQuotedName(GearGlobalVarName("Width"))
+End Sub
+
+Private Sub TryLinkPatternInstanceEquation()
+    Dim featName As String
+    Dim qTeeth As String
+    If swPatternFeat Is Nothing Then Exit Sub
+    featName = swPatternFeat.Name
+    qTeeth = EqQuotedName(GearGlobalVarName("Teeth"))
+    If Not AddOrUpdateDimensionEquation("TotalInstances@" & featName, qTeeth) Then
+        AddOrUpdateDimensionEquation "D1@" & featName, qTeeth
+    End If
+End Sub
+
+Public Sub LinkGearSketchDiameterEquations()
+    On Error Resume Next
+    If swPart Is Nothing Then Exit Sub
+
+    If GearGeom.IsInternal Then
+        LinkSketchDiameterEquation GEAR_DIM_DEDENDUM_DIAMETER, mBlankSketchFeatName, False
+        LinkSketchDiameterEquation GEAR_DIM_ADDENDUM_DIAMETER, mGapSketchFeatName, True
+        LinkSketchDiameterEquation GEAR_DIM_DEDENDUM_DIAMETER, mGapSketchFeatName, False
+    Else
+        LinkSketchDiameterEquation GEAR_DIM_ADDENDUM_DIAMETER, mBlankSketchFeatName, True
+        LinkSketchDiameterEquation GEAR_DIM_DEDENDUM_DIAMETER, mGapSketchFeatName, False
+        LinkSketchDiameterEquation GEAR_DIM_ADDENDUM_DIAMETER, mGapSketchFeatName, True
+    End If
+
+    Dim swEqnMgr As SldWorks.EquationMgr
+    Set swEqnMgr = swPart.GetEquationMgr
+    If Not swEqnMgr Is Nothing Then swEqnMgr.AutomaticSolve = True
+    swPart.ForceRebuild3 True
+    DebugPrint "LinkGearSketchDiameterEquations OK (gear" & GetCurrentGearIndex() & "_*)"
+    On Error GoTo 0
+End Sub
+
+Public Sub LinkGearFeatureEquations()
+    Dim swEqnMgr As SldWorks.EquationMgr
+
+    On Error Resume Next
+    If swPart Is Nothing Then Exit Sub
+
+    If Not swAddendumExtrudeFeat Is Nothing Then
+        TryLinkFeatureDepthEquation swAddendumExtrudeFeat.Name, "D1"
+    End If
+    TryLinkPatternInstanceEquation
+
+    Set swEqnMgr = swPart.GetEquationMgr
+    If Not swEqnMgr Is Nothing Then swEqnMgr.AutomaticSolve = True
+    swPart.ForceRebuild3 True
+    DebugPrint "LinkGearFeatureEquations OK (gear" & GetCurrentGearIndex() & "_*)"
+    On Error GoTo 0
+End Sub
+
+Public Sub LinkGearParametricEquations()
+    LinkGearSketchDiameterEquations
+    LinkGearFeatureEquations
+End Sub
+
+Private Function ReadGearGlobalsFromEquations(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal gearIndex As Long, _
+    ByRef moduleMM As Double, ByRef numTeeth As Long, ByRef pressureDeg As Double, ByRef widthMM As Double) As Boolean
+    Dim swEqnMgr As SldWorks.EquationMgr
+    Dim prefix As String
+    Dim teethVal As Double
+
+    ReadGearGlobalsFromEquations = False
+    If swPartDoc Is Nothing Or gearIndex < 1 Then Exit Function
+    Set swEqnMgr = swPartDoc.GetEquationMgr
+    If swEqnMgr Is Nothing Then Exit Function
+    prefix = "gear" & gearIndex & "_"
+    If Not ReadEquationGlobalDouble(swEqnMgr, prefix & "Module", moduleMM) Then Exit Function
+    If Not ReadEquationGlobalDouble(swEqnMgr, prefix & "Teeth", teethVal) Then Exit Function
+    numTeeth = CLng(teethVal)
+    If Not ReadEquationGlobalDouble(swEqnMgr, prefix & "PressureAngle", pressureDeg) Then pressureDeg = 20#
+    If Not ReadEquationGlobalDouble(swEqnMgr, prefix & "Width", widthMM) Then widthMM = 10#
+    ReadGearGlobalsFromEquations = True
+End Function
+
+Private Function ReadEquationGlobalDouble(ByVal swEqnMgr As SldWorks.EquationMgr, ByVal varName As String, ByRef outVal As Double) As Boolean
+    Dim idx As Long
+    Dim eqLine As String
+    Dim rhs As String
+
+    ReadEquationGlobalDouble = False
+    idx = FindEquationIndexByVarName(swEqnMgr, varName)
+    If idx < 0 Then Exit Function
+    eqLine = swEqnMgr.Equation(idx)
+    rhs = Trim$(Split(eqLine, "=")(1))
+    If rhs = "" Then Exit Function
+    On Error Resume Next
+    outVal = CDbl(rhs)
+    ReadEquationGlobalDouble = (Err.Number = 0)
+    On Error GoTo 0
+End Function
+
+' Body name: Gear{N}_{teeth}T {pitch diameter mm}  e.g. Gear1_100T 125
 Public Function BuildGearBodyName() As String
-    BuildGearBodyName = CStr(GearGeom.NumTeeth) & "T " & FormatPitchDiameterForName(GearGeom.PitchDiameterMM)
+    BuildGearBodyName = "Gear" & GetCurrentGearIndex() & "_" & CStr(GearGeom.NumTeeth) & "T " & _
+        FormatPitchDiameterForName(GearGeom.PitchDiameterMM)
 End Function
 
 Public Function BuildGearAxisFeatureName() As String
@@ -637,74 +1026,49 @@ Private Function BeginSketchOnFrontPlane() As Boolean
     DebugPrint "BeginSketchOnFrontPlane OK"
 End Function
 
+Private Function TryReuseStackedBaseGearAxis() As Boolean
+    Dim ft As SldWorks.Feature
+
+    TryReuseStackedBaseGearAxis = False
+    If GearTrainDrivingAxisName = "" Then Exit Function
+    Set ft = FindRefAxisFeatureByName(GearTrainDrivingAxisName)
+    If ft Is Nothing Then Exit Function
+    Set swGearAxisFeat = ft
+    mAxisName = ft.Name
+    TryReuseStackedBaseGearAxis = True
+    DebugPrint "Stacked gear reuses base ref axis: " & mAxisName
+End Function
+
 Private Function CreateGearAxis() As Boolean
-    ' Driven gear: one ref axis normal to Front plane at layout centre (same direction as driving Axis1)
-    If Abs(mSketchOffsetXM) > 0.0000000001 Or Abs(mSketchOffsetYM) > 0.0000000001 Then
-        CreateGearAxis = CreateDrivenGearRefAxisAtLayoutCenter()
+    If GearTrainRole = GEAR_ROLE_STACKED Then
+        If TryReuseStackedBaseGearAxis() Then
+            CreateGearAxis = True
+            Exit Function
+        End If
+        CreateGearAxis = CreateGearAxisFromSelectedGearCylindricalFace()
         Exit Function
     End If
 
-    Dim swTopPlaneFeat As SldWorks.Feature
-    Dim swRightPlaneFeat As SldWorks.Feature
-
-    If swFrontPlaneFeat Is Nothing Then
-        If Not ResolveAndStoreFrontPlane() Then GoTo AxisFail
+    If GearTrainRole = GEAR_ROLE_DRIVING Then
+        CreateGearAxis = CreateGearAxisFromOriginAndFrontPlane()
+        Exit Function
     End If
 
-    ClearSWSelection
-
-    ' Method A: exact original sequence - plane.Select True + Point1@Origin
-    SelectPlaneFeature swFrontPlaneFeat, True
-    boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0, 0, 0, True, 0, Nothing, 0)
-    If boolstatus Then
-        boolstatus = swDoc.InsertAxis2(True)
-        If boolstatus Then GoTo AxisOk
-    End If
-
-    ' Method B: SelectByID2 plane + origin
-    ClearSWSelection
-    If SelectSWPlaneByName(mFrontPlaneName, False) Or SelectSWPlaneByName("Front Plane", False) Then
-        boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0, 0, 0, True, 0, Nothing, 0)
-        If Not boolstatus Then boolstatus = swModelDocExt.SelectByID2("Origin", "EXTSKETCHPOINT", 0, 0, 0, True, 0, Nothing, 0)
-        If boolstatus Then
-            boolstatus = swDoc.InsertAxis2(True)
-            If boolstatus Then GoTo AxisOk
+    If GearTrainRole = GEAR_ROLE_DRIVEN Then
+        If DrivenGearLayoutDiffersFromSelectedCenter() Then
+            CreateGearAxis = CreateGearAxisFromLayoutPointAndTopPlane()
+            If Not CreateGearAxis Then
+                CreateGearAxis = CreateGearAxisFromSelectedGearCylindricalFace()
+            End If
+        Else
+            CreateGearAxis = CreateGearAxisFromSelectedGearCylindricalFace()
+            If Not CreateGearAxis Then
+                CreateGearAxis = CreateGearAxisFromLayoutPointAndTopPlane()
+            End If
         End If
+        Exit Function
     End If
 
-    ' Method C: Top + Right planes -> Z axis (normal to Front sketch plane)
-    ClearSWSelection
-    Set swTopPlaneFeat = GetRefPlaneByIndex(2)
-    Set swRightPlaneFeat = GetRefPlaneByIndex(3)
-    If Not swTopPlaneFeat Is Nothing And Not swRightPlaneFeat Is Nothing Then
-        SelectPlaneFeature swTopPlaneFeat, True
-        SelectPlaneFeature swRightPlaneFeat, True
-        boolstatus = swDoc.InsertAxis2(True)
-        If boolstatus Then GoTo AxisOk
-    End If
-
-    ClearSWSelection
-    If SelectSWPlaneByName("Top Plane", False) Then
-        If SelectSWPlaneByName("Right Plane", True) Then
-            boolstatus = swDoc.InsertAxis2(True)
-            If boolstatus Then GoTo AxisOk
-        End If
-    End If
-
-    DebugPrint "CreateGearAxis: all methods failed"
-    GoTo AxisFail
-
-AxisOk:
-    Set swGearAxisFeat = FindLastRefAxisFeature()
-    If swGearAxisFeat Is Nothing Then Set swGearAxisFeat = swSelMgr.GetSelectedObject5(1)
-    If swGearAxisFeat Is Nothing Then GoTo AxisFail
-    NameGearAxisForCurrentBuild
-    ClearSWSelection
-    CreateGearAxis = True
-    DebugPrint "CreateGearAxis OK: " & mAxisName
-    Exit Function
-
-AxisFail:
     CreateGearAxis = False
 End Function
 
@@ -726,41 +1090,53 @@ Private Function FeatureIsRefAxis(ByVal ft As SldWorks.Feature) As Boolean
     On Error GoTo 0
 End Function
 
-' Driven gear: RefAxis through layout point, normal to Front plane (parallel to driving Axis1, not in-plane line axis)
-Private Function CreateDrivenGearRefAxisAtLayoutCenter() As Boolean
-    mUseSketchCenterlineAsAxis = False
-    mPatternAxisLineId = ""
-    mPatternAxisSketchName = ""
-    Set mPatternAxisSegment = Nothing
+' True when driven gear centre (layout C) is not the same as the selected gear centre
+Private Function DrivenGearLayoutDiffersFromSelectedCenter() As Boolean
+    Dim drvXM As Double
+    Dim drvYM As Double
+    Dim dM As Double
 
-    ' Do not reuse FindSecondRefAxisFeature — after the first driven gear that is the previous
-    ' driven layout axis, not the driving gear or the new driven centre.
-    Set swGearAxisFeat = Nothing
-    If CreateGearAxisAtSketchCenter() Then
-        CreateDrivenGearRefAxisAtLayoutCenter = True
+    DrivenGearLayoutDiffersFromSelectedCenter = False
+    If Not GetDrivingGearCenterOnFrontPlaneM(drvXM, drvYM) Then
+        DrivenGearLayoutDiffersFromSelectedCenter = (Abs(mSketchOffsetXM) > 0.00001 Or Abs(mSketchOffsetYM) > 0.00001)
         Exit Function
     End If
-
-    ' InsertAxis2 at offset point often does not add Axis2 when Axis1 exists — create axis from blank cylinder after extrude
-    mDrivenPatternUsesBossFace = True
-    mAxisName = ""
-    CreateDrivenGearRefAxisAtLayoutCenter = True
-    DebugPrint "CreateDrivenGearRefAxisAtLayoutCenter: defer axis until addendum boss (cylindrical face)"
+    dM = Sqr((mSketchOffsetXM - drvXM) ^ 2 + (mSketchOffsetYM - drvYM) ^ 2)
+    DrivenGearLayoutDiffersFromSelectedCenter = (dM > 0.00001)
 End Function
 
-Private Function CreateGearAxisAtSketchCenter() As Boolean
-    Dim swSkPt As SldWorks.SketchPoint
-    Dim swSkFeat As SldWorks.Feature
-    Dim skName As String
-    Dim docTitle As String
-    Dim ptName As String
-    Dim axisCountBefore As Long
+Private Function GetTopPlaneFeature() As SldWorks.Feature
+    On Error Resume Next
+    Set GetTopPlaneFeature = GetRefPlaneByIndex(2)
+    If GetTopPlaneFeature Is Nothing Then Set GetTopPlaneFeature = swPart.FeatureByName("Top Plane")
+    On Error GoTo 0
+End Function
+
+Private Function CommitRefAxisAfterInsert(ByVal axisCountBefore As Long) As Boolean
     Dim axisCountAfter As Long
 
-    CreateGearAxisAtSketchCenter = False
+    CommitRefAxisAfterInsert = False
+    ExitActiveSketchIfAny
+    ClearSWSelection
+    RebuildSWPart
+    axisCountAfter = CountRefAxisFeatures()
+    If axisCountAfter <= axisCountBefore Then Exit Function
+    Set swGearAxisFeat = FindLastRefAxisFeature()
+    If swGearAxisFeat Is Nothing Then Exit Function
+    NameGearAxisForCurrentBuild
+    mUseSketchCenterlineAsAxis = False
+    mDrivenPatternUsesBossFace = False
+    CommitRefAxisAfterInsert = True
+End Function
+
+' Driving gear: ref axis through Origin, normal to Front Plane (same plane as gear sketches — Z axis)
+Private Function CreateGearAxisFromOriginAndFrontPlane() As Boolean
+    Dim axisCountBefore As Long
+
+    CreateGearAxisFromOriginAndFrontPlane = False
     If swFrontPlaneFeat Is Nothing Then
         If Not ResolveAndStoreFrontPlane() Then
-            DebugPrint "CreateGearAxisAtSketchCenter: front plane failed"
+            DebugPrint "CreateGearAxisFromOriginAndFrontPlane: Front Plane not found"
             Exit Function
         End If
     End If
@@ -769,12 +1145,135 @@ Private Function CreateGearAxisAtSketchCenter() As Boolean
     ExitActiveSketchIfAny
     ClearSWSelection
 
-    ' Method 1: same as driving gear — Front plane + point, axis normal to face (Z), through layout centre
+    On Error Resume Next
+    boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0#, 0#, 0#, False, 0, Nothing, 0)
+    If boolstatus Then SelectPlaneFeature swFrontPlaneFeat, True
+    If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
+
+    If Not boolstatus Then
+        ClearSWSelection
+        SelectPlaneFeature swFrontPlaneFeat, False
+        boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0#, 0#, 0#, True, 0, Nothing, 0)
+        If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
+    End If
+    On Error GoTo 0
+
+    If CommitRefAxisAfterInsert(axisCountBefore) Then
+        CreateGearAxisFromOriginAndFrontPlane = True
+        DebugPrint "CreateGearAxisFromOriginAndFrontPlane OK: " & mAxisName & " (Origin + Front Plane)"
+    Else
+        DebugPrint "CreateGearAxisFromOriginAndFrontPlane: InsertAxis2 failed"
+    End If
+End Function
+
+Private Function FindLargestCylindricalFaceOnBody(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal bodyLabel As String) As SldWorks.Face2
+    Dim swBody As SldWorks.Body2
+    Dim vFaces As Variant
+    Dim swFace As SldWorks.Face2
+    Dim swSurf As SldWorks.Surface
+    Dim cylParams As Variant
+    Dim bestR As Double
+    Dim r As Double
+    Dim i As Long
+
+    Set FindLargestCylindricalFaceOnBody = Nothing
+    If swPartDoc Is Nothing Or bodyLabel = "" Then Exit Function
+    Set swBody = FindSolidBodyByName(swPartDoc, bodyLabel)
+    If swBody Is Nothing Then Exit Function
+
+    On Error Resume Next
+    vFaces = swBody.GetFaces
+    On Error GoTo 0
+    If Not IsArray(vFaces) Then Exit Function
+
+    bestR = 0#
+    For i = LBound(vFaces) To UBound(vFaces)
+        Set swFace = vFaces(i)
+        If swFace Is Nothing Then GoTo NextCylFace
+        Set swSurf = swFace.GetSurface
+        If swSurf Is Nothing Then GoTo NextCylFace
+        If swSurf.IsCylinder() Then
+            cylParams = swSurf.CylinderParams
+            If IsArray(cylParams) Then
+                If UBound(cylParams) >= 6 Then
+                    r = cylParams(6)
+                    If r > bestR Then
+                        bestR = r
+                        Set FindLargestCylindricalFaceOnBody = swFace
+                    End If
+                End If
+            End If
+        End If
+NextCylFace:
+    Next i
+End Function
+
+' Driven / stacked: ref axis from cylindrical face (radius) of the selected gear body
+Private Function CreateGearAxisFromSelectedGearCylindricalFace() As Boolean
+    Dim swFace As SldWorks.Face2
+    Dim axisCountBefore As Long
+
+    CreateGearAxisFromSelectedGearCylindricalFace = False
+    If GearTrainDrivingBodyLabel = "" Then
+        DebugPrint "CreateGearAxisFromSelectedGearCylindricalFace: no selected gear body"
+        Exit Function
+    End If
+
+    Set swFace = FindLargestCylindricalFaceOnBody(swDoc, GearTrainDrivingBodyLabel)
+    If swFace Is Nothing Then
+        DebugPrint "CreateGearAxisFromSelectedGearCylindricalFace: no cylindrical face on """ & GearTrainDrivingBodyLabel & """"
+        Exit Function
+    End If
+
+    axisCountBefore = CountRefAxisFeatures()
+    ExitActiveSketchIfAny
+    ClearSWSelection
+    RebuildSWPart
+
+    On Error Resume Next
+    If Not SelectForCirPatternMark(swFace, 0, False) Then swFace.Select2 False, 0
+    boolstatus = swDoc.InsertAxis2(True)
+    If Err.Number <> 0 Then
+        DebugPrint "CreateGearAxisFromSelectedGearCylindricalFace InsertAxis2 err: " & Err.Number & " " & Err.Description
+        Err.Clear
+        boolstatus = False
+    End If
+    On Error GoTo 0
+
+    If CommitRefAxisAfterInsert(axisCountBefore) Then
+        CreateGearAxisFromSelectedGearCylindricalFace = True
+        DebugPrint "CreateGearAxisFromSelectedGearCylindricalFace OK: " & mAxisName & " from """ & GearTrainDrivingBodyLabel & """"
+    Else
+        DebugPrint "CreateGearAxisFromSelectedGearCylindricalFace: InsertAxis2 did not add a ref axis"
+    End If
+End Function
+
+' Fallback when cylindrical face on selected gear is unavailable: layout centre + Front Plane
+Private Function CreateGearAxisFromLayoutPointAndTopPlane() As Boolean
+    Dim swSkPt As SldWorks.SketchPoint
+    Dim swSkFeat As SldWorks.Feature
+    Dim skName As String
+    Dim docTitle As String
+    Dim ptName As String
+    Dim axisCountBefore As Long
+
+    CreateGearAxisFromLayoutPointAndTopPlane = False
+    If swFrontPlaneFeat Is Nothing Then
+        If Not ResolveAndStoreFrontPlane() Then
+            DebugPrint "CreateGearAxisFromLayoutPointAndTopPlane: Front Plane not found"
+            Exit Function
+        End If
+    End If
+
+    axisCountBefore = CountRefAxisFeatures()
+    ExitActiveSketchIfAny
+    ClearSWSelection
+
+    On Error Resume Next
     SelectPlaneFeature swFrontPlaneFeat, True
     boolstatus = swModelDocExt.SelectByID2("", "EXTSKETCHPOINT", mSketchOffsetXM, mSketchOffsetYM, 0#, True, 0, Nothing, 0)
     If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
 
-    ' Method 1b: point then plane (append)
     If Not boolstatus Then
         ClearSWSelection
         boolstatus = swModelDocExt.SelectByID2("", "EXTSKETCHPOINT", mSketchOffsetXM, mSketchOffsetYM, 0#, False, 0, Nothing, 0)
@@ -784,18 +1283,14 @@ Private Function CreateGearAxisAtSketchCenter() As Boolean
         End If
     End If
 
-    ' Method 2: sketch point at layout centre, then axis
     If Not boolstatus Then
         If BeginSketchOnFrontPlane() Then
             Set swSkPt = swSketchManager.CreatePoint(mSketchOffsetXM, mSketchOffsetYM, 0#)
             If Not swSkPt Is Nothing Then
                 Set swSkFeat = Nothing
-                On Error Resume Next
                 Set swSkFeat = swSketchManager.ActiveSketch.GetFeature
-                On Error GoTo 0
                 If swSkFeat Is Nothing Then Set swSkFeat = FindLastSketchFeature()
                 If Not swSkFeat Is Nothing Then skName = swSkFeat.Name
-
                 ClearSWSelection
                 SelectPlaneFeature swFrontPlaneFeat, True
                 swSkPt.Select4 True, Nothing
@@ -805,7 +1300,6 @@ Private Function CreateGearAxisAtSketchCenter() As Boolean
         End If
     End If
 
-    ' Method 3: named sketch point after closing sketch
     If Not boolstatus And skName <> "" Then
         ClearSWSelection
         docTitle = swDoc.GetTitle
@@ -816,27 +1310,15 @@ Private Function CreateGearAxisAtSketchCenter() As Boolean
         If Not boolstatus Then boolstatus = swModelDocExt.SelectByID2("Point1@" & skName, "EXTSKETCHPOINT", mSketchOffsetXM, mSketchOffsetYM, 0#, True, 0, Nothing, 0)
         If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
     End If
+    On Error GoTo 0
 
-    ExitActiveSketchIfAny
-    ClearSWSelection
-    RebuildSWPart
-
-    axisCountAfter = CountRefAxisFeatures()
-    If axisCountAfter <= axisCountBefore Then
-        DebugPrint "CreateGearAxisAtSketchCenter: no new axis (before=" & axisCountBefore & " after=" & axisCountAfter & ")"
-        Exit Function
+    If CommitRefAxisAfterInsert(axisCountBefore) Then
+        CreateGearAxisFromLayoutPointAndTopPlane = True
+        DebugPrint "CreateGearAxisFromLayoutPointAndTopPlane OK: " & mAxisName & " at (" & _
+            Format(mSketchOffsetXM * MM_PER_M, "0.###") & ", " & Format(mSketchOffsetYM * MM_PER_M, "0.###") & ") mm"
+    Else
+        DebugPrint "CreateGearAxisFromLayoutPointAndTopPlane: InsertAxis2 failed at layout centre"
     End If
-
-    Set swGearAxisFeat = FindLastRefAxisFeature()
-    If swGearAxisFeat Is Nothing Then
-        DebugPrint "CreateGearAxisAtSketchCenter: axis count increased but could not get axis feature"
-        Exit Function
-    End If
-
-    NameGearAxisForCurrentBuild
-    mUseSketchCenterlineAsAxis = False
-    CreateGearAxisAtSketchCenter = True
-    DebugPrint "CreateGearAxisAtSketchCenter OK: " & mAxisName & " (normal to Front) at " & Format(mSketchOffsetXM * MM_PER_M, "0.###") & " mm"
 End Function
 
 Private Function FindAddendumCylindricalFace() As SldWorks.Face2
@@ -866,13 +1348,36 @@ Private Function FindAddendumCylindricalFace() As SldWorks.Face2
 End Function
 
 ' Ref axis normal to gear face through driven centre — from cylindrical face of addendum blank (reliable when Axis1 exists)
+Private Sub SyncSketchOffsetFromAddendumBossCenter()
+    Dim swFace As SldWorks.Face2
+    Dim swSurf As SldWorks.Surface
+    Dim cylParams As Variant
+
+    On Error Resume Next
+    Set swFace = FindAddendumCylindricalFace()
+    If swFace Is Nothing Then Exit Sub
+    Set swSurf = swFace.GetSurface
+    If swSurf Is Nothing Then Exit Sub
+    If Not swSurf.IsCylinder() Then Exit Sub
+    cylParams = swSurf.CylinderParams
+    If Not IsArray(cylParams) Then Exit Sub
+    If UBound(cylParams) >= 1 Then
+        mSketchOffsetXM = cylParams(0)
+        mSketchOffsetYM = cylParams(1)
+        DebugPrint "Sketch centre synced to boss cylinder (mm)=" & _
+            Format(mSketchOffsetXM * MM_PER_M, "0.###") & ", " & Format(mSketchOffsetYM * MM_PER_M, "0.###")
+    End If
+    On Error GoTo 0
+End Sub
+
 Public Function TryCreateDrivenRefAxisFromBossFace() As Boolean
     Dim swFace As SldWorks.Face2
     Dim axisCountBefore As Long
     Dim axisCountAfter As Long
 
     TryCreateDrivenRefAxisFromBossFace = False
-    If Not mDrivenPatternUsesBossFace And Not swGearAxisFeat Is Nothing Then Exit Function
+    ' Stacked gear reusing the base ref axis — do not replace with a new boss-face axis
+    If GearTrainRole = GEAR_ROLE_STACKED And Not swGearAxisFeat Is Nothing And GearTrainDrivingAxisName <> "" Then Exit Function
 
     Set swFace = FindAddendumCylindricalFace()
     If swFace Is Nothing Then
@@ -945,6 +1450,33 @@ Private Function CountRefAxisFeatures() As Long
     CountRefAxisFeatures = n
 End Function
 
+Private Function SelectLastSketchForExtrude() As Boolean
+    Dim swSkFeat As SldWorks.Feature
+    Dim skName As String
+    Dim docTitle As String
+
+    SelectLastSketchForExtrude = False
+    Set swSkFeat = FindLastSketchFeature()
+    If swSkFeat Is Nothing Then Exit Function
+
+    ClearSWSelection
+    skName = swSkFeat.Name
+    On Error Resume Next
+    swSkFeat.Select2 False, 0
+    If swSelMgr.GetSelectedObjectCount2(-1) >= 1 Then
+        SelectLastSketchForExtrude = True
+        Exit Function
+    End If
+    docTitle = swDoc.GetTitle
+    If docTitle <> "" Then
+        SelectLastSketchForExtrude = swModelDocExt.SelectByID2(skName & "@" & docTitle, "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+    End If
+    If Not SelectLastSketchForExtrude Then
+        SelectLastSketchForExtrude = swModelDocExt.SelectByID2(skName, "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+    End If
+    On Error GoTo 0
+End Function
+
 Private Function FindLastSketchFeature() As SldWorks.Feature
     Dim ft As SldWorks.Feature
     Dim lastSk As SldWorks.Feature
@@ -980,7 +1512,7 @@ Private Sub ResolveToothCutForPattern()
         DebugPrint "ResolveToothCutForPattern: using " & swToothCutFeat.Name
         Exit Sub
     End If
-    If GearTrainRole = GEAR_ROLE_DRIVEN Then Exit Sub
+    If GearTrainRoleIsDrivenOrStacked() Then Exit Sub
     Set swToothCutFeat = FindFeatureByNameSafe("Cut-Extrude1")
 End Sub
 
@@ -1004,7 +1536,7 @@ Public Function CreateOrResetPart() As Boolean
     mFrontPlaneName = ""
     mAxisName = ""
 
-    If GearTrainRole <> GEAR_ROLE_DRIVEN Then
+    If Not GearTrainRoleIsDrivenOrStacked() Then
         On Error Resume Next
         swDoc.ViewZoomtofit2
         swDoc.GraphicsRedraw2
@@ -1029,7 +1561,7 @@ Public Function CreateOrResetPart() As Boolean
     End If
     On Error GoTo 0
     If Not axisOk Then
-        DebugPrint "CreateOrResetPart: CreateGearAxis failed (driven=" & (GearTrainRole = GEAR_ROLE_DRIVEN) & _
+        DebugPrint "CreateOrResetPart: CreateGearAxis failed (add-to-part=" & GearTrainRoleIsDrivenOrStacked() & _
             " centerline=" & mUseSketchCenterlineAsAxis & ")"
         CreateOrResetPart = False
         Exit Function
@@ -1049,21 +1581,265 @@ Public Function CreateOrResetPart() As Boolean
     CreateOrResetPart = True
 End Function
 
-' Driving gear: pitch/addendum/dedendum center at part origin (concentric to Origin)
-Private Sub ConstrainGearCenterToOrigin(ByVal swCircle As SldWorks.SketchSegment)
-    On Error Resume Next
-    If swCircle Is Nothing Then Exit Sub
-    If Abs(mSketchOffsetXM) > 0.0000000001 Or Abs(mSketchOffsetYM) > 0.0000000001 Then Exit Sub
+' Sketch-plane gear centre from addendum boss cylinder — same source as spline offset (not ref-axis params)
+Private Function GetGearAxisCenterOnSketchM(ByRef xM As Double, ByRef yM As Double) As Boolean
+    SyncSketchOffsetFromAddendumBossCenter
+    xM = mSketchOffsetXM
+    yM = mSketchOffsetYM
+    GetGearAxisCenterOnSketchM = True
+End Function
 
+Private Function SelectGearRefAxisForSketchConvert() As Boolean
+    SelectGearRefAxisForSketchConvert = False
+    On Error Resume Next
     ClearSWSelection
-    boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0#, 0#, 0#, False, 0, Nothing, 0)
-    If Not boolstatus Then Exit Sub
+    If mAxisName <> "" Then
+        SelectGearRefAxisForSketchConvert = swModelDocExt.SelectByID2(mAxisName, "AXIS", 0, 0, 0, False, 0, Nothing, 0)
+        If Not SelectGearRefAxisForSketchConvert Then
+            SelectGearRefAxisForSketchConvert = swModelDocExt.SelectByID2(mAxisName, "REFAXIS", 0, 0, 0, False, 0, Nothing, 0)
+        End If
+    End If
+    If Not SelectGearRefAxisForSketchConvert And Not swGearAxisFeat Is Nothing Then
+        SelectGearRefAxisForSketchConvert = swGearAxisFeat.Select2(False, 0)
+    End If
+    On Error GoTo 0
+End Function
+
+' Anchor a sketch point on the gear axis (Origin for first driving gear; pierce ref axis otherwise)
+Private Function EnsureAxisAnchorPointInActiveSketch() As Boolean
+    Dim xA As Double
+    Dim yA As Double
+    Dim swPt As SldWorks.SketchPoint
+
+    EnsureAxisAnchorPointInActiveSketch = False
+    On Error Resume Next
+    If Not GetGearAxisCenterOnSketchM(xA, yA) Then Exit Function
+
+    Set swPt = FindAxisSketchPointInActiveSketch()
+    If swPt Is Nothing Then
+        Set swPt = swSketchManager.CreatePoint(xA, yA, 0)
+    End If
+    If swPt Is Nothing Then Exit Function
+
+    If GearTrainRole = GEAR_ROLE_DRIVING And Abs(xA) < 0.0000000001 And Abs(yA) < 0.0000000001 Then
+        ClearSWSelection
+        boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0#, 0#, 0#, False, 0, Nothing, 0)
+        If boolstatus Then
+            swPt.Select4 True, Nothing
+            swDoc.SketchAddConstraints "sgCOINCIDENT"
+            EnsureAxisAnchorPointInActiveSketch = True
+            DebugPrint "EnsureAxisAnchorPointInActiveSketch: coincident to Origin"
+            ClearSWSelection
+            On Error GoTo 0
+            Exit Function
+        End If
+    End If
+
+    If SelectGearRefAxisForSketchConvert() Then
+        swPt.Select4 True, Nothing
+        swDoc.SketchAddConstraints "sgPIERCE"
+        EnsureAxisAnchorPointInActiveSketch = True
+        DebugPrint "EnsureAxisAnchorPointInActiveSketch: pierce to ref axis"
+    Else
+        EnsureAxisAnchorPointInActiveSketch = True
+        DebugPrint "EnsureAxisAnchorPointInActiveSketch: point at boss centre (mm)=" & _
+            Format(xA * MM_PER_M, "0.###") & ", " & Format(yA * MM_PER_M, "0.###")
+    End If
+    ClearSWSelection
+    On Error GoTo 0
+End Function
+
+Private Function FindAxisSketchPointInActiveSketch() As SldWorks.SketchPoint
+    Dim swSk As SldWorks.Sketch
+    Dim vPts As Variant
+    Dim swPt As SldWorks.SketchPoint
+    Dim xA As Double
+    Dim yA As Double
+    Dim i As Long
+    Dim bestDist As Double
+    Dim d As Double
+
+    Set FindAxisSketchPointInActiveSketch = Nothing
+    If Not GetGearAxisCenterOnSketchM(xA, yA) Then Exit Function
+    Set swSk = swSketchManager.ActiveSketch
+    If swSk Is Nothing Then Exit Function
+    On Error Resume Next
+    vPts = swSk.GetSketchPoints2
+    If Not IsArray(vPts) Then Exit Function
+    bestDist = 1E+30
+    For i = LBound(vPts) To UBound(vPts)
+        Set swPt = vPts(i)
+        d = (swPt.X - xA) ^ 2 + (swPt.Y - yA) ^ 2
+        If d < bestDist Then
+            bestDist = d
+            Set FindAxisSketchPointInActiveSketch = swPt
+        End If
+    Next i
+    On Error GoTo 0
+End Function
+
+Private Sub ConstrainSketchPointConcentricToCircle(ByVal swPt As SldWorks.SketchPoint, ByVal swCircle As SldWorks.SketchSegment)
+    On Error Resume Next
+    If swPt Is Nothing Or swCircle Is Nothing Then Exit Sub
+    ClearSWSelection
+    swPt.Select4 False, Nothing
     swCircle.Select4 True, Nothing
     swDoc.SketchAddConstraints "sgCONCENTRIC"
     ClearSWSelection
-    DebugPrint "ConstrainGearCenterToOrigin: circle center concentric to Origin"
     On Error GoTo 0
 End Sub
+
+' Arc or circle centre concentric to gear axis (Origin for first driving gear; else ref-axis anchor)
+Private Sub ConstrainArcOrCircleCenterToAxis(ByVal swArcOrCircle As SldWorks.SketchSegment)
+    On Error Resume Next
+    If swArcOrCircle Is Nothing Then Exit Sub
+    ConstrainGearCircleCenterToAxis swArcOrCircle
+    On Error GoTo 0
+End Sub
+
+' Driving gear at part origin: lock blank circle centre to Origin before ref axis exists
+Private Function ConstrainGearCircleCenterToOrigin(ByVal swCircle As SldWorks.SketchSegment) As Boolean
+    On Error Resume Next
+    ConstrainGearCircleCenterToOrigin = False
+    If swCircle Is Nothing Then Exit Function
+    If GearTrainRole <> GEAR_ROLE_DRIVING Then Exit Function
+    If Abs(mSketchOffsetXM) > 0.0000000001 Or Abs(mSketchOffsetYM) > 0.0000000001 Then Exit Function
+    ClearSWSelection
+    boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0#, 0#, 0#, False, 0, Nothing, 0)
+    If Not boolstatus Then Exit Function
+    swCircle.Select4 True, Nothing
+    swDoc.SketchAddConstraints "sgCONCENTRIC"
+    ClearSWSelection
+    ConstrainGearCircleCenterToOrigin = True
+    DebugPrint "ConstrainGearCircleCenterToOrigin: blank centre concentric to Origin"
+    On Error GoTo 0
+End Function
+
+' Circle centre concentric to ref axis (projected point on Front sketch plane)
+Private Sub ConstrainGearCircleCenterToAxis(ByVal swCircle As SldWorks.SketchSegment)
+    Dim swPt As SldWorks.SketchPoint
+    Dim xA As Double
+    Dim yA As Double
+
+    On Error Resume Next
+    If swCircle Is Nothing Then Exit Sub
+
+    If ConstrainGearCircleCenterToOrigin(swCircle) Then Exit Sub
+
+    EnsureAxisAnchorPointInActiveSketch
+    Set swPt = FindAxisSketchPointInActiveSketch()
+    If Not swPt Is Nothing Then
+        ConstrainSketchPointConcentricToCircle swPt, swCircle
+        DebugPrint "ConstrainGearCircleCenterToAxis: circle concentric to ref axis point"
+        Exit Sub
+    End If
+
+    GetGearAxisCenterOnSketchM xA, yA
+    Set swPt = swSketchManager.CreatePoint(xA, yA, 0)
+    If Not swPt Is Nothing Then
+        ConstrainSketchPointConcentricToCircle swPt, swCircle
+        DebugPrint "ConstrainGearCircleCenterToAxis: circle concentric to axis centre point (fallback)"
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Sub ConstrainConstructionCircleToAxisPoint(ByVal swCircle As SldWorks.SketchSegment)
+    On Error Resume Next
+    If swCircle Is Nothing Then Exit Sub
+    ConstrainGearCircleCenterToAxis swCircle
+    On Error GoTo 0
+End Sub
+
+Private Sub ConstrainSketchSegmentsCoradial(ByVal swArcOrCircle1 As SldWorks.SketchSegment, _
+    ByVal swArcOrCircle2 As SldWorks.SketchSegment)
+    On Error Resume Next
+    If swArcOrCircle1 Is Nothing Or swArcOrCircle2 Is Nothing Then Exit Sub
+    ClearSWSelection
+    swArcOrCircle1.Select4 False, Nothing
+    swArcOrCircle2.Select4 True, Nothing
+    swDoc.SketchAddConstraints "sgCORADIAL"
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+Private Sub ConstrainSketchSegmentsConcentric(ByVal swCircle1 As SldWorks.SketchSegment, _
+    ByVal swCircle2 As SldWorks.SketchSegment)
+    On Error Resume Next
+    If swCircle1 Is Nothing Or swCircle2 Is Nothing Then Exit Sub
+    ClearSWSelection
+    swCircle1.Select4 False, Nothing
+    swCircle2.Select4 True, Nothing
+    swDoc.SketchAddConstraints "sgCONCENTRIC"
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+Private Sub ConstrainTangentSketchSegments(ByVal swSeg1 As SldWorks.SketchSegment, ByVal swSeg2 As SldWorks.SketchSegment)
+    On Error Resume Next
+    If swSeg1 Is Nothing Or swSeg2 Is Nothing Then Exit Sub
+    ClearSWSelection
+    swSeg1.Select4 False, Nothing
+    swSeg2.Select4 True, Nothing
+    swDoc.SketchAddConstraints "sgTANGENT"
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+Private Sub CoincidentSketchPointToCircle(ByVal swSeg As SldWorks.SketchSegment, ByVal useEnd As Boolean, _
+    ByVal swCircle As SldWorks.SketchSegment)
+    Dim sp As SldWorks.SketchPoint
+    On Error Resume Next
+    If swSeg Is Nothing Or swCircle Is Nothing Then Exit Sub
+    If useEnd Then Set sp = swSeg.GetEndPoint2 Else Set sp = swSeg.GetStartPoint2
+    If sp Is Nothing Then Exit Sub
+    ClearSWSelection
+    sp.Select4 False, Nothing
+    swCircle.Select4 True, Nothing
+    swDoc.SketchAddConstraints "sgCOINCIDENT"
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+Private Sub ReadSplineEndpointCoordsM(ByVal swSeg As SldWorks.SketchSegment, ByVal useEnd As Boolean, _
+    ByRef xM As Double, ByRef yM As Double)
+    Dim sp As SldWorks.SketchPoint
+    On Error Resume Next
+    If useEnd Then Set sp = swSeg.GetEndPoint2 Else Set sp = swSeg.GetStartPoint2
+    If Not sp Is Nothing Then
+        xM = sp.X
+        yM = sp.Y
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Sub ConstrainGapEndpointsToConstructionCircles()
+    On Error Resume Next
+    If mGapDaConstrCircle Is Nothing Or mGapDdConstrCircle Is Nothing Then Exit Sub
+    If swInvoluteSpline Is Nothing Or swMirroredInvoluteSpline Is Nothing Then Exit Sub
+    swSketchManager.AutoSolve = True
+    CoincidentSketchPointToCircle swInvoluteSpline, False, mGapDdConstrCircle
+    CoincidentSketchPointToCircle swInvoluteSpline, True, mGapDaConstrCircle
+    CoincidentSketchPointToCircle swMirroredInvoluteSpline, False, mGapDdConstrCircle
+    CoincidentSketchPointToCircle swMirroredInvoluteSpline, True, mGapDaConstrCircle
+    DebugPrint "ConstrainGapEndpointsToConstructionCircles OK"
+    On Error GoTo 0
+End Sub
+
+Private Function CreateGapConstructionCircleAtAxis(ByVal radiusM As Double, ByVal dimName As String, _
+    ByVal diameterMM As Double) As SldWorks.SketchSegment
+    Dim cx As Double
+    Dim cy As Double
+
+    Set CreateGapConstructionCircleAtAxis = Nothing
+    On Error Resume Next
+    GetGearAxisCenterOnSketchM cx, cy
+    Set CreateGapConstructionCircleAtAxis = swSketchManager.CreateCircle(cx, cy, 0, cx + radiusM, cy, 0)
+    If CreateGapConstructionCircleAtAxis Is Nothing Then Exit Function
+    CreateGapConstructionCircleAtAxis.ConstructionGeometry = True
+    AddDiameterDimensionToCircle CreateGapConstructionCircleAtAxis, dimName, diameterMM
+    ConstrainConstructionCircleToAxisPoint CreateGapConstructionCircleAtAxis
+    On Error GoTo 0
+End Function
 
 ' ---------------------------------------------------------------------------
 ' 4. CreateAddendumBlank - full disk at outer (addendum) diameter
@@ -1073,9 +1849,12 @@ Public Function CreateAddendumBlank() As Boolean
     Dim swCircle As SketchSegment
     Dim rM As Double
     Dim mergeBoss As Boolean
+    Dim startCond As Long
+    Dim startOff As Double
+    Dim swBlankSketchFeat As SldWorks.Feature
 
     ExitActiveSketchIfAny
-    If GearTrainRole = GEAR_ROLE_DRIVEN Then RebuildSWPart
+    If GearTrainRoleIsDrivenOrStacked() Then RebuildSWPart
 
     If GearGeom.IsInternal Then
         rM = GearGeom.DedendumRadiusM
@@ -1097,15 +1876,32 @@ Public Function CreateAddendumBlank() As Boolean
     Else
         AddDiameterDimensionToCircle swCircle, GEAR_DIM_ADDENDUM_DIAMETER, GearGeom.AddendumDiameterMM
     End If
-    ConstrainGearCenterToOrigin swCircle
+    ConstrainGearCircleCenterToAxis swCircle
 
     swSketchManager.InsertSketch True
+    Set swBlankSketchFeat = FindLastSketchFeature()
+    If Not swBlankSketchFeat Is Nothing Then mBlankSketchFeatName = swBlankSketchFeat.Name
+
     mergeBoss = Not PartNeedsCutFeatureScope()
 
-    Set swAddendumExtrudeFeat = swFeatMgr.FeatureExtrusion3(True, False, False, 0, 0, GearGeom.WidthM, 0#, _
-        False, False, False, False, 0, 0, False, False, False, False, mergeBoss, False, False, 0, 0, False)
+    GetGearExtrudeStartParams startCond, startOff
 
-    If swAddendumExtrudeFeat Is Nothing Then GoTo BlankFail
+    If Not SelectLastSketchForExtrude() Then
+        DebugPrint "CreateAddendumBlank: could not select blank sketch for extrude"
+        GoTo BlankFail
+    End If
+
+    On Error Resume Next
+    Err.Clear
+    Set swAddendumExtrudeFeat = swFeatMgr.FeatureExtrusion3(True, False, False, 0, 0, GearGeom.WidthM, 0#, _
+        False, False, False, False, 0, 0, False, False, False, False, mergeBoss, False, False, startCond, startOff, False)
+    If swAddendumExtrudeFeat Is Nothing Then
+        DebugPrint "CreateAddendumBlank: FeatureExtrusion3 failed (err=" & Err.Number & " " & Err.Description & _
+            ", startCond=" & startCond & " startOffMm=" & Format(startOff * MM_PER_M, "0.###") & " merge=" & mergeBoss & ")"
+        Err.Clear
+        GoTo BlankFail
+    End If
+    On Error GoTo BlankFail
     DebugPrint "Addendum blank feature: " & swAddendumExtrudeFeat.Name
 
     If PartNeedsCutFeatureScope() Then
@@ -1121,13 +1917,13 @@ Public Function CreateAddendumBlank() As Boolean
 
     DebugPrint "CreateAddendumBlank OK (" & IIf(GearGeom.IsInternal, "ring Dd/2=", "Da/2=") & _
         Format(IIf(GearGeom.IsInternal, GearGeom.DedendumRadiusMM, GearGeom.AddendumRadiusMM), "0.###") & " mm" & _
+        IIf(mBossStartOffsetZM > 0.0000000001, ", Z start=" & Format(mBossStartOffsetZM * MM_PER_M, "0.###") & " mm", "") & _
         IIf(PartNeedsCutFeatureScope(), ", separate body)", ")")
 
-    If GearTrainRole = GEAR_ROLE_DRIVEN Then
-        If mDrivenPatternUsesBossFace Or swGearAxisFeat Is Nothing Then
-            TryCreateDrivenRefAxisFromBossFace
-        End If
+    If swGearAxisFeat Is Nothing Then
+        TryCreateDrivenRefAxisFromBossFace
     End If
+    SyncSketchOffsetFromAddendumBossCenter
 
     CreateAddendumBlank = True
     Exit Function
@@ -1150,7 +1946,7 @@ Private Function CutInternalGearBore() As Boolean
     Set swCircle = swSketchManager.CreateCircleByRadius(mSketchOffsetXM, mSketchOffsetYM, 0, rM)
     If swCircle Is Nothing Then GoTo BoreFail
     AddDiameterDimensionToCircle swCircle, GEAR_DIM_ADDENDUM_DIAMETER, GearGeom.AddendumDiameterMM
-    ConstrainGearCenterToOrigin swCircle
+    ConstrainGearCircleCenterToAxis swCircle
     swSketchManager.InsertSketch True
     Set swBoreSketch = FindLastSketchFeature()
     If swBoreSketch Is Nothing Then GoTo BoreFail
@@ -1279,12 +2075,14 @@ Private Function CreateCircleArcBetween(ByVal r As Double, _
     ByVal xStart As Double, ByVal yStart As Double, _
     ByVal xEnd As Double, ByVal yEnd As Double) As SldWorks.SketchSegment
     Dim angS As Double, angE As Double, angM As Double
-    angS = Atn2(yStart - mSketchOffsetYM, xStart - mSketchOffsetXM)
-    angE = Atn2(yEnd - mSketchOffsetYM, xEnd - mSketchOffsetXM)
+    Dim cx As Double, cy As Double
+    GetGearAxisCenterOnSketchM cx, cy
+    angS = Atn2(yStart - cy, xStart - cx)
+    angE = Atn2(yEnd - cy, xEnd - cx)
     angM = ArcMidAngleShort(angS, angE)
     Set CreateCircleArcBetween = swSketchManager.Create3PointArc( _
         xStart, yStart, 0, xEnd, yEnd, 0, _
-        mSketchOffsetXM + r * Cos(angM), mSketchOffsetYM + r * Sin(angM), 0)
+        cx + r * Cos(angM), cy + r * Sin(angM), 0)
 End Function
 
 Private Sub OffsetSketchPointArray(ByRef pts() As Double, ByVal n As Long)
@@ -1378,11 +2176,19 @@ Public Function CreateToothGapSketch() As Boolean
     halfPitch = pitch / 2#
 
     sketchStep = "begin sketch"
+    SyncSketchOffsetFromAddendumBossCenter
     If Not BeginSketchOnFrontPlane() Then
         DebugPrint "CreateToothGapSketch: BeginSketchOnFrontPlane failed"
         GoTo SketchFail
     End If
     Set sw2DSketch = swSketchManager.ActiveSketch
+    EnsureAxisAnchorPointInActiveSketch
+
+    sketchStep = "construction circles"
+    Set mGapDaConstrCircle = CreateGapConstructionCircleAtAxis(ra, GEAR_DIM_ADDENDUM_DIAMETER, GearGeom.AddendumDiameterMM)
+    Set mGapDdConstrCircle = CreateGapConstructionCircleAtAxis(rr, GEAR_DIM_DEDENDUM_DIAMETER, GearGeom.DedendumDiameterMM)
+    If mGapDaConstrCircle Is Nothing Or mGapDdConstrCircle Is Nothing Then GoTo SketchFail
+    ConstrainSketchSegmentsConcentric mGapDaConstrCircle, mGapDdConstrCircle
 
     ' Center gap on +X (reference tooth is at 0; gap center is at half pitch)
     For i = 0 To n - 1
@@ -1423,15 +2229,31 @@ Public Function CreateToothGapSketch() As Boolean
     Set swMirroredInvoluteSpline = swSketchManager.CreateSpline(ptsNextLeft)
     If swMirroredInvoluteSpline Is Nothing Then GoTo SketchFail
 
-    ' Arcs use exact spline corner coords; CW on Da/Dd; high-Y end on flank A
+    sketchStep = "endpoints on Da/Dd"
+    ConstrainGapEndpointsToConstructionCircles
+    ReadSplineEndpointCoordsM swInvoluteSpline, False, xRootA, yRootA
+    ReadSplineEndpointCoordsM swInvoluteSpline, True, xTipA, yTipA
+    ReadSplineEndpointCoordsM swMirroredInvoluteSpline, False, xRootB, yRootB
+    ReadSplineEndpointCoordsM swMirroredInvoluteSpline, True, xTipB, yTipB
+
+    ' Arcs use solved spline corner coords on Da/Dd circles
     sketchStep = "gap tip and root arcs"
     If Not AddGapTipRootArcs(ra, rr, xRootA, yRootA, xRootB, yRootB, xTipA, yTipA, xTipB, yTipB) Then GoTo SketchFail
 
-    AddDiameterDimensionOnConstructionCircle xTipA, yTipA, GEAR_DIM_ADDENDUM_DIAMETER, GearGeom.AddendumDiameterMM
-    AddDiameterDimensionOnConstructionCircle xRootA, yRootA, GEAR_DIM_DEDENDUM_DIAMETER, GearGeom.DedendumDiameterMM
+    sketchStep = "arcs coradial with Da/Dd"
+    ConstrainSketchSegmentsCoradial swTipLandArc, mGapDaConstrCircle
+    ConstrainSketchSegmentsCoradial swRootArc, mGapDdConstrCircle
+    ConstrainArcOrCircleCenterToAxis swTipLandArc
+    ConstrainArcOrCircleCenterToAxis swRootArc
 
     sketchStep = "coincident corners"
     ConstrainGapSketchClosed
+
+    sketchStep = "spline tangent at arcs"
+    ConstrainTangentSketchSegments swInvoluteSpline, swRootArc
+    ConstrainTangentSketchSegments swInvoluteSpline, swTipLandArc
+    ConstrainTangentSketchSegments swMirroredInvoluteSpline, swTipLandArc
+    ConstrainTangentSketchSegments swMirroredInvoluteSpline, swRootArc
 
     sketchStep = "capture sketch"
     Set swToothGapSketchFeat = FindLastSketchFeature()
@@ -1439,10 +2261,12 @@ Public Function CreateToothGapSketch() As Boolean
         DebugPrint "CreateToothGapSketch: could not get sketch feature"
         GoTo SketchFail
     End If
+    mGapSketchFeatName = swToothGapSketchFeat.Name
 
     sketchStep = "exit sketch"
     swSketchManager.InsertSketch True
     ClearSWSelection
+    RebuildSWPart
 
     DebugPrint "CreateToothGapSketch OK (gap pitch=" & Format(pitch * 180# / Pi, "0.###") & " deg)"
     CreateToothGapSketch = True
@@ -1630,12 +2454,15 @@ Private Function TryCreateGapCutFeature(ByRef methodUsed As String) As SldWorks.
     Dim useScope As Boolean
     Dim useFeatScope As Boolean
     Dim useAutoSelect As Boolean
+    Dim startCond As Long
+    Dim startOff As Double
 
     Set TryCreateGapCutFeature = Nothing
     methodUsed = ""
     useScope = PartNeedsCutFeatureScope()
     useFeatScope = useScope
     useAutoSelect = Not useScope
+    GetGearExtrudeStartParams startCond, startOff
     On Error Resume Next
 
     Err.Clear
@@ -1648,7 +2475,7 @@ Private Function TryCreateGapCutFeature(ByRef methodUsed As String) As SldWorks.
         False, _
         useFeatScope, useAutoSelect, _
         False, False, False, _
-        SW_START_SKETCH_PLANE, 0#, False, False)
+        startCond, startOff, False, False)
     If Not TryCreateGapCutFeature Is Nothing Then
         methodUsed = "FeatureCut4 ThroughAll"
         Exit Function
@@ -1664,7 +2491,7 @@ Private Function TryCreateGapCutFeature(ByRef methodUsed As String) As SldWorks.
         False, _
         useFeatScope, useAutoSelect, _
         False, False, False, _
-        SW_START_SKETCH_PLANE, 0#, False, False)
+        startCond, startOff, False, False)
     If Not TryCreateGapCutFeature Is Nothing Then
         methodUsed = "FeatureCut4 Blind depth"
         Exit Function
@@ -1681,12 +2508,31 @@ Private Function TryCreateGapCutFeature(ByRef methodUsed As String) As SldWorks.
         False, _
         useFeatScope, useAutoSelect, _
         False, False, False, _
-        SW_START_SKETCH_PLANE, 0#, False, False)
+        startCond, startOff, False, False)
     If Not TryCreateGapCutFeature Is Nothing Then
         methodUsed = "FeatureCut4 ThroughAll (Dir reversed)"
         Exit Function
     End If
     lastErr = Err.Number: lastDesc = Err.Description: Err.Clear
+
+    ' Single-body / auto-intersect fallback (helps when sketch has construction circles)
+    If Not useScope Then
+        Set TryCreateGapCutFeature = swFeatMgr.FeatureCut4( _
+            True, False, False, _
+            SW_END_THROUGH_ALL, SW_END_BLIND, 0#, 0#, _
+            False, False, False, False, _
+            0#, 0#, _
+            False, False, False, False, _
+            False, _
+            False, True, _
+            False, False, False, _
+            SW_START_SKETCH_PLANE, 0#, False, False)
+        If Not TryCreateGapCutFeature Is Nothing Then
+            methodUsed = "FeatureCut4 ThroughAll (auto-intersect)"
+            Exit Function
+        End If
+        lastErr = Err.Number: lastDesc = Err.Description: Err.Clear
+    End If
 
     ' Multibody fallback: sketch-only + feature scope auto-intersect (tooth sketch is on driven blank only)
     If useScope Then
@@ -1699,7 +2545,7 @@ Private Function TryCreateGapCutFeature(ByRef methodUsed As String) As SldWorks.
             False, _
             True, True, _
             False, False, False, _
-            SW_START_SKETCH_PLANE, 0#, False, False)
+            startCond, startOff, False, False)
         If Not TryCreateGapCutFeature Is Nothing Then
             methodUsed = "FeatureCut4 ThroughAll (scope auto-intersect)"
             Exit Function
@@ -1726,6 +2572,7 @@ Public Function CutExtrudeToothGap() As Boolean
     End If
 
     RebuildSWPart
+    ExitActiveSketchIfAny
     If Not SelectGapSketchForCut() Then
         DebugPrint "CutExtrudeToothGap: sketch select failed (" & swToothGapSketchFeat.Name & ")"
         GoTo CutFail
@@ -1814,21 +2661,21 @@ Private Function PreselectCircularPattern(ByRef stepDetail As String) As Boolean
 
     stepDetail = "axis mark1"
     axisOk = False
-    If axisName <> "" Then
+    Set swCylFace = FindAddendumCylindricalFace()
+    If Not swCylFace Is Nothing Then
+        axisOk = SelectForCirPatternMark(swCylFace, 1, True)
+        If axisOk Then DebugPrint "Preselect: pattern axis = addendum cylindrical face"
+    End If
+    If Not axisOk And axisName <> "" Then
         axisOk = swModelDocExt.SelectByID2(axisName, "AXIS", 0, 0, 0, True, 1, Nothing, 0)
         If Not axisOk Then axisOk = swModelDocExt.SelectByID2(axisName, "REFAXIS", 0, 0, 0, True, 1, Nothing, 0)
         If Not axisOk Then axisOk = swModelDocExt.SelectByID2(axisName, "RefAxis", 0, 0, 0, True, 1, Nothing, 0)
         If Not axisOk Then axisOk = SelectAxisByNameWithDocSuffix(axisName)
+        If axisOk Then DebugPrint "Preselect: pattern axis = ref axis " & axisName
     End If
     If Not axisOk And Not swGearAxisFeat Is Nothing Then
         axisOk = SelectForCirPatternMark(swGearAxisFeat, 1, True)
-    End If
-    If Not axisOk And (mDrivenPatternUsesBossFace Or GearTrainRole = GEAR_ROLE_DRIVEN) Then
-        Set swCylFace = FindAddendumCylindricalFace()
-        If Not swCylFace Is Nothing Then
-            axisOk = SelectForCirPatternMark(swCylFace, 1, True)
-            If axisOk Then DebugPrint "Preselect: pattern axis = addendum cylindrical face"
-        End If
+        If axisOk Then DebugPrint "Preselect: pattern axis = ref axis feature"
     End If
     If Not axisOk Then
         DebugPrint "Preselect: axis failed for " & axisName
@@ -1891,7 +2738,7 @@ Public Function CircularPatternTooth() As Boolean
         Set swGearAxisFeat = FindRefAxisFeatureByName(mAxisName)
     End If
     ' Driving gear only: legacy parts may still have Axis1 / unnamed origin axis
-    If swGearAxisFeat Is Nothing And GearTrainRole <> GEAR_ROLE_DRIVEN Then
+    If swGearAxisFeat Is Nothing And Not GearTrainRoleIsDrivenOrStacked() Then
         Set swGearAxisFeat = FindLastRefAxisFeature()
     End If
     ResolveToothCutForPattern
@@ -1899,7 +2746,7 @@ Public Function CircularPatternTooth() As Boolean
         DebugPrint "CircularPatternTooth: missing tooth gap cut"
         GoTo PatternFail
     End If
-    If GearTrainRole = GEAR_ROLE_DRIVEN Then
+    If GearTrainRoleIsDrivenOrStacked() Then
         RebuildSWPart
         If swGearAxisFeat Is Nothing Or mDrivenPatternUsesBossFace Then TryCreateDrivenRefAxisFromBossFace
         If swGearAxisFeat Is Nothing Then
@@ -1907,6 +2754,9 @@ Public Function CircularPatternTooth() As Boolean
         End If
         If swGearAxisFeat Is Nothing And mAxisName <> "" Then
             Set swGearAxisFeat = FindRefAxisFeatureByName(mAxisName)
+        End If
+        If swGearAxisFeat Is Nothing And GearTrainRole = GEAR_ROLE_STACKED And GearTrainDrivingAxisName <> "" Then
+            Set swGearAxisFeat = FindRefAxisFeatureByName(GearTrainDrivingAxisName)
         End If
     End If
 
@@ -2173,6 +3023,7 @@ Public Sub StoreGearMetadataOnPart()
     SetPartCustomProperty GEAR_PROP_PITCH_DIA, CStr(GearGeom.PitchDiameterMM)
     SetPartCustomProperty GEAR_PROP_ADDENDUM_DIA, CStr(GearGeom.AddendumDiameterMM)
     SetPartCustomProperty GEAR_PROP_IS_INTERNAL, IIf(GearGeom.IsInternal, "1", "0")
+    SetPartCustomProperty GEAR_PROP_GEAR_INDEX, CStr(GetCurrentGearIndex())
     DebugPrint "StoreGearMetadataOnPart OK"
     On Error GoTo 0
 End Sub
@@ -2261,10 +3112,10 @@ Private Function TryParseGearBodyName(ByVal bodyName As String, ByRef pitchDiame
     TryParseGearBodyName = False
     pitchDiameterMM = 0#
     numTeeth = 0
-    s = Trim$(bodyName)
+    s = StripGearBodyNamePrefix(bodyName)
     If Len(s) < 3 Then Exit Function
 
-    ' Current format: {teeth}T {pitch dia}  e.g. 100T 125
+    ' Current format: {teeth}T {pitch dia}  e.g. 100T 125  (also Gear1_100T 125 after strip)
     i = 1
     Do While i <= Len(s)
         ch = Mid$(s, i, 1)
@@ -2334,6 +3185,7 @@ Public Function ReadGearMetadataFromBody(ByVal swBody As SldWorks.Body2, ByVal s
     ByRef moduleMM As Double, ByRef numTeeth As Long, ByRef pressureDeg As Double, ByRef widthMM As Double) As Boolean
     Dim pitchDia As Double
     Dim swExt As SldWorks.ModelDocExtension
+    Dim gearIdx As Long
 
     ReadGearMetadataFromBody = False
     pressureDeg = 20#
@@ -2343,10 +3195,17 @@ Public Function ReadGearMetadataFromBody(ByVal swBody As SldWorks.Body2, ByVal s
     If Not swBody Is Nothing Then
         If TryParseGearBodyName(swBody.Name, pitchDia, numTeeth) Then
             moduleMM = pitchDia / CDbl(numTeeth)
-            If swPartDoc Is Nothing Then GoTo BodyMetaOk
-            Set swExt = swPartDoc.Extension
-            If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_PRESSURE, pressureDeg) Then pressureDeg = 20#
-            If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_WIDTH, widthMM) Then widthMM = 10#
+            If Not swPartDoc Is Nothing Then
+                Set swExt = swPartDoc.Extension
+                gearIdx = ParseGearIndexFromBodyName(swBody.Name)
+                If gearIdx > 0 Then
+                    If ReadGearGlobalsFromEquations(swPartDoc, gearIdx, moduleMM, numTeeth, pressureDeg, widthMM) Then
+                        GoTo BodyMetaOk
+                    End If
+                End If
+                If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_PRESSURE, pressureDeg) Then pressureDeg = 20#
+                If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_WIDTH, widthMM) Then widthMM = 10#
+            End If
 BodyMetaOk:
             ReadGearMetadataFromBody = True
             Exit Function
@@ -2690,6 +3549,17 @@ Public Function ApplyDrivenGearInputsFromDrivingGear() As Boolean
     ApplyDrivenGearInputsFromDrivingGear = True
     DebugPrint "Driven gear inherits m=" & GearGeom.ModuleMM & " pa=" & GearGeom.PressureAngleDeg & _
         " C=" & Format(GearTrainCenterDistanceMM, "0.###") & " mm"
+End Function
+
+Public Function ApplyStackedGearInputsFromBaseGear() As Boolean
+    ApplyStackedGearInputsFromBaseGear = False
+    If GearTrainDrivingTeeth <= 0 Or GearTrainDrivingModuleMM <= 0 Then Exit Function
+
+    GearGeom.PressureAngleDeg = GearTrainDrivingPressureDeg
+    GearGeom.ModuleMM = GearTrainDrivingModuleMM
+    ApplyStackedGearInputsFromBaseGear = True
+    DebugPrint "Stacked gear inherits m=" & GearGeom.ModuleMM & " pa=" & GearGeom.PressureAngleDeg & _
+        " width=" & Format(GearGeom.WidthMM, "0.###") & " mm from form"
 End Function
 
 ' Sketch dimension names (InvoluteGear_*) complement custom properties on the part.

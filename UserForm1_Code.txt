@@ -7,7 +7,8 @@
 ' ADD THESE CONTROLS IN THE VBA FORM DESIGNER (names must match):
 '   optDrivingGear   OptionButton  Caption "Driving gear"   GroupName = "GearRole"
 '   optDrivenGear    OptionButton  Caption "Driven gear"    GroupName = "GearRole"
-'   fraDrivenGear    Frame         Caption "Driven gear layout"
+'   optStackedGear   OptionButton  Caption "Stacked"        GroupName = "GearRole"
+'   fraDrivenGear    Frame         Caption "Driven gear layout" (stays visible for Stacked too if picker controls are inside it)
 '   lblDrivingGear   Label         Caption "Driving gear:"
 '   btnCancel / cbCancel / btnClose — call CloseGearForm (ends main() DoEvents loop)
 '   cboDrivingGearBody ComboBox    Style=2 — macro gears from all open parts
@@ -369,41 +370,45 @@ Private Sub TextBox3_Change()
 End Sub
 
 Private Sub UpdateGearRoleUI()
-    Dim showDriven As Boolean
+    Dim showDrivenLayout As Boolean
+    Dim showBaseGearPicker As Boolean
     On Error Resume Next
 
-    showDriven = False
-    showDriven = GetOptionValue("optDrivenGear")
+    showDrivenLayout = GetOptionValue("optDrivenGear")
+    showBaseGearPicker = showDrivenLayout Or GetOptionValue("optStackedGear") Or (GearTrainRole = GEAR_ROLE_STACKED)
 
-    SetFormControlVisible "fraDrivenGear", showDriven
-    SetFormControlVisible "lblDrivingGear", showDriven
-    SetFormControlVisible "cboDrivingGearBody", showDriven
-    SetFormControlVisible "tbDrivingGearBody", showDriven
-    SetFormControlVisible "btnPickDrivingBody", showDriven
-    SetFormControlVisible "btnRefreshDrivingGear", showDriven
-    SetFormControlVisible "lblMeshAngle", showDriven
-    SetFormControlVisible "tbMeshAngle", showDriven
-    SetFormControlVisible "lblTrainCenter", showDriven
-    SetFormControlVisible "tbTrainCenter", showDriven
-    SetFormControlVisible "fraManufacturing", showDriven
-    SetFormControlVisible "tbTrainCenterAdjusted", showDriven
-    SetFormControlVisible "tbCenterClearance", showDriven
-    SetFormControlVisible "tbBacklash", showDriven
-    SetFormControlVisible "TextBox1", showDriven
-    SetFormControlVisible "TextBox2", showDriven
-    SetFormControlVisible "TextBox3", showDriven
-    SetFormControlVisible "cboMfgMethods", showDriven
-    SetFormControlVisible "cboMfgMethod", showDriven
+    ' Frame must stay visible for Stacked when picker controls live inside fraDrivenGear (child Visible is ignored if parent is hidden)
+    SetFormControlVisible "fraDrivenGear", showBaseGearPicker
+    SetFormControlVisible "lblDrivingGear", showBaseGearPicker
+    SetFormControlVisible "cboDrivingGearBody", showBaseGearPicker
+    SetFormControlVisible "tbDrivingGearBody", showBaseGearPicker
+    SetFormControlVisible "btnPickDrivingBody", showBaseGearPicker
+    SetFormControlVisible "btnRefreshDrivingGear", showBaseGearPicker
+    SetFormControlVisible "lblMeshAngle", showDrivenLayout
+    SetFormControlVisible "tbMeshAngle", showDrivenLayout
+    SetFormControlVisible "lblTrainCenter", showDrivenLayout
+    SetFormControlVisible "tbTrainCenter", showDrivenLayout
+    SetFormControlVisible "fraManufacturing", showDrivenLayout
+    SetFormControlVisible "tbTrainCenterAdjusted", showDrivenLayout
+    SetFormControlVisible "tbCenterClearance", showDrivenLayout
+    SetFormControlVisible "tbBacklash", showDrivenLayout
+    SetFormControlVisible "TextBox1", showDrivenLayout
+    SetFormControlVisible "TextBox2", showDrivenLayout
+    SetFormControlVisible "TextBox3", showDrivenLayout
+    SetFormControlVisible "cboMfgMethods", showDrivenLayout
+    SetFormControlVisible "cboMfgMethod", showDrivenLayout
 
-    If showDriven Then
-        ApplyMfgMethodDefaults
+    If showBaseGearPicker Then
         tbModule.Enabled = False
         tbPressureAngle.Enabled = False
         tbModule.BackColor = RGB(240, 240, 240)
         tbPressureAngle.BackColor = RGB(240, 240, 240)
         RefreshDrivingGearBodyCombo
         UpdateDrivingGearDisplay
-        UpdateTrainCenterDistance
+        If showDrivenLayout Then
+            ApplyMfgMethodDefaults
+            UpdateTrainCenterDistance
+        End If
     Else
         tbModule.Enabled = True
         tbPressureAngle.Enabled = True
@@ -563,6 +568,12 @@ Private Sub optDrivenGear_Click()
     UpdateGearCalculations
 End Sub
 
+Private Sub optStackedGear_Click()
+    GearTrainRole = GEAR_ROLE_STACKED
+    UpdateGearRoleUI
+    UpdateGearCalculations
+End Sub
+
 Private Sub cboDrivingGearBody_Change()
     ApplyDrivingGearFromComboSelection
 End Sub
@@ -615,7 +626,16 @@ Private Sub cbGenerate_Click()
     Dim Width As Double
     Dim ErrorMsg As String
 
-    If GetOptionValue("optDrivenGear") Then
+    If GetOptionValue("optStackedGear") Then
+        GearTrainRole = GEAR_ROLE_STACKED
+        If GearTrainDrivingPartTitle = "" Then
+            ApplyDrivingGearFromComboSelection
+        End If
+        If GearTrainDrivingPartTitle = "" Then
+            MsgBox "Choose the base gear from the list (open that part first, then Refresh list).", vbExclamation
+            Exit Sub
+        End If
+    ElseIf GetOptionValue("optDrivenGear") Then
         GearTrainRole = GEAR_ROLE_DRIVEN
         If GearTrainDrivingPartTitle = "" Then
             ApplyDrivingGearFromComboSelection

@@ -72,6 +72,7 @@ Public boolstatus As Boolean
 ' Gear train / mesh layout (driven gear picks up params from driving gear body)
 Public Const GEAR_ROLE_DRIVING As Long = 0
 Public Const GEAR_ROLE_DRIVEN As Long = 1
+Public Const GEAR_ROLE_STACKED As Long = 2
 
 Public GearTrainRole As Long
 Public GearTrainMeshAngleDeg As Double
@@ -145,20 +146,27 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
 
     CalculateGearGeometry
 
-    If GearTrainRole = GEAR_ROLE_DRIVEN Then
+    If GearTrainRole = GEAR_ROLE_DRIVEN Or GearTrainRole = GEAR_ROLE_STACKED Then
         If GearTrainDrivingPartTitle = "" Then
-            MsgBox "Select a driving gear from the list (Refresh list after opening the part).", vbExclamation
+            MsgBox "Select a gear from the list (Refresh list after opening the part).", vbExclamation
             Exit Sub
         End If
-        If Not ApplyDrivenGearInputsFromDrivingGear() Then
-            MsgBox "Driven gear mode requires a valid driving gear (body name ""teethT pitchDia"" e.g. 100T 125, or InvoluteGear custom properties).", vbExclamation
-            Exit Sub
+        If GearTrainRole = GEAR_ROLE_DRIVEN Then
+            If Not ApplyDrivenGearInputsFromDrivingGear() Then
+                MsgBox "Driven gear mode requires a valid driving gear (body name ""teethT pitchDia"" e.g. 100T 125, or InvoluteGear custom properties).", vbExclamation
+                Exit Sub
+            End If
+        Else
+            If Not ApplyStackedGearInputsFromBaseGear() Then
+                MsgBox "Stacked gear mode requires a valid base gear (body name ""teethT pitchDia"" e.g. 100T 125, or InvoluteGear custom properties).", vbExclamation
+                Exit Sub
+            End If
         End If
         CalculateGearGeometry
         Set swDoc = FindOpenPartDocumentByTitle(GearTrainDrivingPartTitle)
         SyncDrivingGearAxisReference swDoc
         If swDoc Is Nothing Then
-            MsgBox "Could not open the driving gear part: " & GearTrainDrivingPartTitle, vbCritical
+            MsgBox "Could not open the gear part: " & GearTrainDrivingPartTitle, vbCritical
             Exit Sub
         End If
     Else
@@ -198,6 +206,8 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
     ResetGearSketchOffset
     SetGearTrainSketchOffsetFromLayout
     CaptureSolidBodyCountBeforeGearBuild
+    AssignCurrentGearIndex
+    CreateGearGlobalVariableEquations
 
     ' Addendum disk boss, cut one tooth-gap, circular pattern the cut
     If Not CreateOrResetPart() Then
@@ -227,10 +237,15 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
 
     NameGearSolidBodyAfterBuild
     NameGearAxisForCurrentBuild
+    LinkGearSketchDiameterEquations
+    LinkGearFeatureEquations
     StoreGearMetadataOnPart
     If GearTrainRole = GEAR_ROLE_DRIVEN Then
         DebugPrint "Gear train driven layout: C=" & Format(GetGearTrainLayoutCenterDistanceMM(), "0.###") & _
             " mm angle=" & Format(GearTrainMeshAngleDeg, "0.###") & " deg from driving " & GearTrainDrivingPartTitle & _
+            " axis=" & GearTrainDrivingAxisName
+    ElseIf GearTrainRole = GEAR_ROLE_STACKED Then
+        DebugPrint "Stacked gear on " & GearTrainDrivingPartTitle & " / " & GearTrainDrivingBodyLabel & _
             " axis=" & GearTrainDrivingAxisName
     End If
 
