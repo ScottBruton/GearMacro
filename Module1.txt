@@ -39,6 +39,7 @@ Public Const GEAR_PROP_PRESSURE As String = "InvoluteGear_PressureAngle"
 Public Const GEAR_PROP_WIDTH As String = "InvoluteGear_Width"
 Public Const GEAR_PROP_PITCH_DIA As String = "InvoluteGear_PitchDiameter"
 Public Const GEAR_PROP_ADDENDUM_DIA As String = "InvoluteGear_AddendumDiameter"
+Public Const GEAR_PROP_IS_INTERNAL As String = "InvoluteGear_IsInternal"
 
 ' Ref axis feature name = solid body name + suffix (avoids SW tree name clashes with the body)
 Public Const GEAR_AXIS_NAME_SUFFIX As String = " Axis"
@@ -98,7 +99,7 @@ Public Sub SyncGearTrainLayoutCenterFromForm()
     z2 = CLng(UserForm1.tbTeeth.Text)
     If z2 <= 0 Then Exit Sub
 
-    cNom = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, z2)
+    cNom = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, z2, GearTrainDrivingIsInternal, GearGeom.IsInternal)
     GearTrainCenterDistanceMM = cNom
 
     clr = UserForm1.MfgClearanceMM()
@@ -414,12 +415,29 @@ End Function
 
 Public Function ValidateGearInputsPublic(ByVal pressureAngleDeg As Double, ByVal moduleMM As Double, ByVal numTeeth As Long, ByVal widthMM As Double) As Boolean
     Dim errMsg As String
+    Dim minTeeth As Double
+    Dim alphaRad As Double
     errMsg = ""
 
     If pressureAngleDeg <= 0# Or pressureAngleDeg >= 90# Then errMsg = errMsg & "Invalid pressure angle." & vbCrLf
     If moduleMM <= 0# Then errMsg = errMsg & "Invalid module." & vbCrLf
     If numTeeth < 3 Then errMsg = errMsg & "Tooth count must be >= 3." & vbCrLf
     If widthMM <= 0# Then errMsg = errMsg & "Invalid width." & vbCrLf
+
+    If GearGeom.IsInternal Then
+        Dim tipDia As Double
+        Dim rootDia As Double
+        alphaRad = pressureAngleDeg * 3.14159265358979 / 180#
+        minTeeth = 2# / (Sin(alphaRad) ^ 2)
+        If numTeeth < minTeeth + 1 Then
+            errMsg = errMsg & "Internal gear needs more teeth (min ~" & Format(minTeeth + 1, "0") & " at this pressure angle)." & vbCrLf
+        End If
+        tipDia = moduleMM * numTeeth - 2# * moduleMM
+        rootDia = moduleMM * numTeeth + 2.5 * moduleMM
+        If tipDia <= 0# Or rootDia <= tipDia Then
+            errMsg = errMsg & "Internal gear: tip diameter must be less than root diameter (increase teeth or module)." & vbCrLf
+        End If
+    End If
 
     If errMsg <> "" Then
         MsgBox errMsg, vbExclamation, "Invalid Gear Inputs"
@@ -445,9 +463,16 @@ Public Sub CalculateGearGeometry()
     GearGeom.PitchRadiusMM = GearGeom.PitchDiameterMM / 2#
     GearGeom.BaseDiameterMM = GearGeom.PitchDiameterMM * Cos(alphaRad)
     GearGeom.BaseRadiusMM = GearGeom.BaseDiameterMM / 2#
-    GearGeom.AddendumDiameterMM = GearGeom.PitchDiameterMM + 2# * GearGeom.ModuleMM
+
+    If GearGeom.IsInternal Then
+        ' Ring gear: tip (addendum) toward bore, root (dedendum) at outer rim
+        GearGeom.AddendumDiameterMM = GearGeom.PitchDiameterMM - 2# * GearGeom.ModuleMM
+        GearGeom.DedendumDiameterMM = GearGeom.PitchDiameterMM + 2.5 * GearGeom.ModuleMM
+    Else
+        GearGeom.AddendumDiameterMM = GearGeom.PitchDiameterMM + 2# * GearGeom.ModuleMM
+        GearGeom.DedendumDiameterMM = GearGeom.PitchDiameterMM - 2.5 * GearGeom.ModuleMM
+    End If
     GearGeom.AddendumRadiusMM = GearGeom.AddendumDiameterMM / 2#
-    GearGeom.DedendumDiameterMM = GearGeom.PitchDiameterMM - 2.5 * GearGeom.ModuleMM
     GearGeom.DedendumRadiusMM = GearGeom.DedendumDiameterMM / 2#
 
     GearGeom.CircularPitchMM = Pi * GearGeom.ModuleMM
@@ -480,7 +505,8 @@ Public Sub CalculateGearGeometry()
     GearGeom.DedendumRadiusM = GearGeom.DedendumRadiusMM / MM_PER_M
     GearGeom.WidthM = GearGeom.WidthMM / MM_PER_M
 
-    DebugPrint "CalculateGearGeometry: Dp=" & Format(GearGeom.PitchDiameterMM, "0.###") & _
+    DebugPrint "CalculateGearGeometry: " & IIf(GearGeom.IsInternal, "INTERNAL", "EXTERNAL") & _
+        " Dp=" & Format(GearGeom.PitchDiameterMM, "0.###") & _
         " Db=" & Format(GearGeom.BaseDiameterMM, "0.###") & _
         " Dd=" & Format(GearGeom.DedendumDiameterMM, "0.###") & _
         " Da=" & Format(GearGeom.AddendumDiameterMM, "0.###") & _
@@ -1048,9 +1074,14 @@ Public Function CreateAddendumBlank() As Boolean
     Dim rM As Double
     Dim mergeBoss As Boolean
 
-    rM = GearGeom.AddendumRadiusM
     ExitActiveSketchIfAny
     If GearTrainRole = GEAR_ROLE_DRIVEN Then RebuildSWPart
+
+    If GearGeom.IsInternal Then
+        rM = GearGeom.DedendumRadiusM
+    Else
+        rM = GearGeom.AddendumRadiusM
+    End If
 
     If Not BeginSketchOnFrontPlane() Then
         DebugPrint "CreateAddendumBlank: BeginSketchOnFrontPlane failed"
@@ -1061,7 +1092,11 @@ Public Function CreateAddendumBlank() As Boolean
     Set swCircle = swSketchManager.CreateCircleByRadius(mSketchOffsetXM, mSketchOffsetYM, 0, rM)
     If swCircle Is Nothing Then GoTo BlankFail
 
-    AddDiameterDimensionToCircle swCircle, GEAR_DIM_ADDENDUM_DIAMETER, GearGeom.AddendumDiameterMM
+    If GearGeom.IsInternal Then
+        AddDiameterDimensionToCircle swCircle, GEAR_DIM_DEDENDUM_DIAMETER, GearGeom.DedendumDiameterMM
+    Else
+        AddDiameterDimensionToCircle swCircle, GEAR_DIM_ADDENDUM_DIAMETER, GearGeom.AddendumDiameterMM
+    End If
     ConstrainGearCenterToOrigin swCircle
 
     swSketchManager.InsertSketch True
@@ -1079,7 +1114,13 @@ Public Function CreateAddendumBlank() As Boolean
 
     ClearSWSelection
     RebuildSWPart
-    DebugPrint "CreateAddendumBlank OK (Da/2=" & Format(GearGeom.AddendumRadiusMM, "0.###") & " mm" & _
+
+    If GearGeom.IsInternal Then
+        If Not CutInternalGearBore() Then GoTo BlankFail
+    End If
+
+    DebugPrint "CreateAddendumBlank OK (" & IIf(GearGeom.IsInternal, "ring Dd/2=", "Da/2=") & _
+        Format(IIf(GearGeom.IsInternal, GearGeom.DedendumRadiusMM, GearGeom.AddendumRadiusMM), "0.###") & " mm" & _
         IIf(PartNeedsCutFeatureScope(), ", separate body)", ")")
 
     If GearTrainRole = GEAR_ROLE_DRIVEN Then
@@ -1094,6 +1135,40 @@ Public Function CreateAddendumBlank() As Boolean
 BlankFail:
     DebugPrint "CreateAddendumBlank FAIL: " & Err.Description
     CreateAddendumBlank = False
+End Function
+
+' Internal ring: cut bore at tip (addendum) diameter after outer rim boss
+Private Function CutInternalGearBore() As Boolean
+    On Error GoTo BoreFail
+    Dim swCircle As SketchSegment
+    Dim swBoreSketch As SldWorks.Feature
+    Dim methodUsed As String
+    Dim rM As Double
+
+    rM = GearGeom.AddendumRadiusM
+    If Not BeginSketchOnFrontPlane() Then GoTo BoreFail
+    Set swCircle = swSketchManager.CreateCircleByRadius(mSketchOffsetXM, mSketchOffsetYM, 0, rM)
+    If swCircle Is Nothing Then GoTo BoreFail
+    AddDiameterDimensionToCircle swCircle, GEAR_DIM_ADDENDUM_DIAMETER, GearGeom.AddendumDiameterMM
+    ConstrainGearCenterToOrigin swCircle
+    swSketchManager.InsertSketch True
+    Set swBoreSketch = FindLastSketchFeature()
+    If swBoreSketch Is Nothing Then GoTo BoreFail
+    RebuildSWPart
+    ClearSWSelection
+    swBoreSketch.Select2 False, 0
+    If PartNeedsCutFeatureScope() Then
+        If SelectCurrentGearBodyForCutScope() Then swBoreSketch.Select2 True, 0
+    End If
+    If TryCreateGapCutFeature(methodUsed) Is Nothing Then GoTo BoreFail
+    ClearSWSelection
+    RebuildSWPart
+    DebugPrint "CutInternalGearBore OK (Da/2=" & Format(GearGeom.AddendumRadiusMM, "0.###") & " mm, " & methodUsed & ")"
+    CutInternalGearBore = True
+    Exit Function
+BoreFail:
+    DebugPrint "CutInternalGearBore FAIL: " & Err.Description
+    CutInternalGearBore = False
 End Function
 
 ' ---------------------------------------------------------------------------
@@ -1129,12 +1204,14 @@ Public Function GenerateInvolutePoints(ByRef outPoints() As Double, ByRef pointC
         End If
         InvoluteXY t, rb, x, y
         RotatePoint x, y, rotAngle, x, y
+        If GearGeom.IsInternal Then RotatePoint x, y, Pi, x, y
         outPoints(i * 3) = x
         outPoints(i * 3 + 1) = y
         outPoints(i * 3 + 2) = 0#
     Next i
 
-    DebugPrint "GenerateInvolutePoints OK (" & pointCount & " points, rot=" & Format(rotAngle * 180# / Pi, "0.###") & " deg)"
+    DebugPrint "GenerateInvolutePoints OK (" & pointCount & " points, rot=" & Format(rotAngle * 180# / Pi, "0.###") & _
+        " deg" & IIf(GearGeom.IsInternal, ", internal", "") & ")"
     GenerateInvolutePoints = True
     Exit Function
 
@@ -2066,8 +2143,15 @@ ValFail:
     RebuildAndValidate = False
 End Function
 
-Public Function CenterDistanceMM(ByVal moduleMM As Double, ByVal z1 As Long, ByVal z2 As Long) As Double
-    CenterDistanceMM = moduleMM * (CDbl(z1) + CDbl(z2)) / 2#
+Public Function CenterDistanceMM(ByVal moduleMM As Double, ByVal z1 As Long, ByVal z2 As Long, _
+    Optional ByVal gear1Internal As Boolean = False, Optional ByVal gear2Internal As Boolean = False) As Double
+    If gear1Internal And Not gear2Internal Then
+        CenterDistanceMM = moduleMM * (CDbl(z1) - CDbl(z2)) / 2#
+    ElseIf gear2Internal And Not gear1Internal Then
+        CenterDistanceMM = moduleMM * (CDbl(z2) - CDbl(z1)) / 2#
+    Else
+        CenterDistanceMM = moduleMM * (CDbl(z1) + CDbl(z2)) / 2#
+    End If
 End Function
 
 Private Sub SetPartCustomProperty(ByVal propName As String, ByVal propValue As String)
@@ -2088,6 +2172,7 @@ Public Sub StoreGearMetadataOnPart()
     SetPartCustomProperty GEAR_PROP_WIDTH, CStr(GearGeom.WidthMM)
     SetPartCustomProperty GEAR_PROP_PITCH_DIA, CStr(GearGeom.PitchDiameterMM)
     SetPartCustomProperty GEAR_PROP_ADDENDUM_DIA, CStr(GearGeom.AddendumDiameterMM)
+    SetPartCustomProperty GEAR_PROP_IS_INTERNAL, IIf(GearGeom.IsInternal, "1", "0")
     DebugPrint "StoreGearMetadataOnPart OK"
     On Error GoTo 0
 End Sub
@@ -2125,6 +2210,24 @@ Private Function ReadPartCustomPropertyLong(ByVal swExt As SldWorks.ModelDocExte
         outVal = CLng(useVal)
         ReadPartCustomPropertyLong = True
     End If
+    On Error GoTo 0
+End Function
+
+Public Function ReadGearIsInternalFromDoc(ByVal swSourceDoc As SldWorks.ModelDoc2) As Boolean
+    Dim swExt As SldWorks.ModelDocExtension
+    Dim valOut As String
+    Dim resolvedValOut As String
+    Dim useVal As String
+    On Error Resume Next
+    ReadGearIsInternalFromDoc = False
+    If swSourceDoc Is Nothing Then Exit Function
+    Set swExt = swSourceDoc.Extension
+    valOut = ""
+    resolvedValOut = ""
+    swExt.CustomPropertyManager("").Get4 GEAR_PROP_IS_INTERNAL, False, valOut, resolvedValOut
+    useVal = LCase$(Trim$(resolvedValOut))
+    If useVal = "" Then useVal = LCase$(Trim$(valOut))
+    ReadGearIsInternalFromDoc = (useVal = "1" Or useVal = "true" Or useVal = "yes" Or useVal = "internal")
     On Error GoTo 0
 End Function
 
@@ -2493,10 +2596,11 @@ Public Function ApplyDrivingGearFromComboIndex(ByVal index As Long) As Boolean
     GearTrainDrivingTeeth = z1
     GearTrainDrivingPressureDeg = pa
     GearTrainDrivingWidthMM = w
+    GearTrainDrivingIsInternal = ReadGearIsInternalFromDoc(swPartDoc)
     SyncDrivingGearAxisReference swPartDoc
     ApplyDrivingGearFromComboIndex = True
     DebugPrint "Driving gear from list: " & GearTrainDrivingPartTitle & " / " & GearTrainDrivingBodyLabel & _
-        " z=" & z1 & " axis=" & GearTrainDrivingAxisName
+        " z=" & z1 & IIf(GearTrainDrivingIsInternal, " INTERNAL", " EXTERNAL") & " axis=" & GearTrainDrivingAxisName
 End Function
 
 Public Function GetPartDocFromSelectedBody(ByVal swBody As SldWorks.Body2) As SldWorks.ModelDoc2
@@ -2566,6 +2670,7 @@ Public Function PickDrivingGearBodyFromSelection() As Boolean
     GearTrainDrivingTeeth = z1
     GearTrainDrivingPressureDeg = pa
     GearTrainDrivingWidthMM = w
+    GearTrainDrivingIsInternal = ReadGearIsInternalFromDoc(swPartDoc)
     SyncDrivingGearAxisReference swPartDoc
     PickDrivingGearBodyFromSelection = True
     DebugPrint "Picked driving gear: " & GearTrainDrivingPartTitle & " / " & GearTrainDrivingBodyLabel & _
@@ -2580,7 +2685,8 @@ Public Function ApplyDrivenGearInputsFromDrivingGear() As Boolean
     GearGeom.ModuleMM = GearTrainDrivingModuleMM
     If GearTrainDrivingWidthMM > 0 Then GearGeom.WidthMM = GearTrainDrivingWidthMM
 
-    GearTrainCenterDistanceMM = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, GearGeom.NumTeeth)
+    GearTrainCenterDistanceMM = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, GearGeom.NumTeeth, _
+        GearTrainDrivingIsInternal, GearGeom.IsInternal)
     ApplyDrivenGearInputsFromDrivingGear = True
     DebugPrint "Driven gear inherits m=" & GearGeom.ModuleMM & " pa=" & GearGeom.PressureAngleDeg & _
         " C=" & Format(GearTrainCenterDistanceMM, "0.###") & " mm"

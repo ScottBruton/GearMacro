@@ -24,6 +24,9 @@
 '   tbBacklash OR TextBox2 = backlash at pitch circle (mm), added to layout C
 '   tbTrainCenterAdjusted OR TextBox3 = read-only adjusted centre distance (mm)
 '
+'   optExternalGear   OptionButton  Caption "External"   GroupName = "GearType"
+'   optInternalGear    OptionButton  Caption "Internal (ring)"   GroupName = "GearType"
+'
 ' Existing controls: tbPressureAngle, tbModule, tbTeeth, tbWidth, cbGenerate, etc.
 
 Private Sub UserForm_Initialize()
@@ -34,7 +37,9 @@ Private Sub UserForm_Initialize()
     tbWidth.Text = "10"
 
     If ControlExists("optDrivingGear") Then optDrivingGear.Value = True
+    If ControlExists("optExternalGear") Then optExternalGear.Value = True
     If ControlExists("tbMeshAngle") Then tbMeshAngle.Text = "0"
+    SyncGearTypeFromForm
 
     InitMfgMethodCombo
     InitMfgControlTooltips
@@ -51,6 +56,20 @@ End Sub
 Private Function ControlExists(ByVal ctrlName As String) As Boolean
     ControlExists = Not (FindControlByName(Me, ctrlName) Is Nothing)
 End Function
+
+Private Function GetOptionValue(ByVal ctrlName As String) As Boolean
+    Dim ctrl As Object
+    GetOptionValue = False
+    Set ctrl = FindControlByName(Me, ctrlName)
+    If ctrl Is Nothing Then Exit Function
+    On Error Resume Next
+    GetOptionValue = ctrl.Value
+    On Error GoTo 0
+End Function
+
+Private Sub SyncGearTypeFromForm()
+    GearGeom.IsInternal = GetOptionValue("optInternalGear")
+End Sub
 
 ' Controls inside a Frame are not on Me.Controls — use FindControlByName for get/set/visible
 Private Sub SetFormTextBox(ByVal ctrlName As String, ByVal value As String)
@@ -237,7 +256,7 @@ End Sub
 Private Sub UserForm_Activate()
     InitMfgMethodCombo
     On Error Resume Next
-    If ControlExists("optDrivenGear") And optDrivenGear.Value Then RefreshDrivingGearBodyCombo
+    If GetOptionValue("optDrivenGear") Then RefreshDrivingGearBodyCombo
     On Error GoTo 0
 End Sub
 
@@ -354,7 +373,7 @@ Private Sub UpdateGearRoleUI()
     On Error Resume Next
 
     showDriven = False
-    If ControlExists("optDrivenGear") Then showDriven = optDrivenGear.Value
+    showDriven = GetOptionValue("optDrivenGear")
 
     SetFormControlVisible "fraDrivenGear", showDriven
     SetFormControlVisible "lblDrivingGear", showDriven
@@ -493,7 +512,8 @@ Private Sub UpdateTrainCenterDistance()
     End If
 
     z2 = CLng(teethText)
-    c = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, z2)
+    SyncGearTypeFromForm
+    c = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, z2, GearTrainDrivingIsInternal, GearGeom.IsInternal)
     SetFormTextBox "tbTrainCenter", Format(c, "0.###") & " mm"
     GearTrainCenterDistanceMM = c
     UpdateAdjustedCenterDistance c
@@ -517,6 +537,18 @@ Private Sub UpdateAdjustedCenterDistance(ByVal cNominal As Double)
 
     SetMfgTextBox GetMfgAdjustedCenterTextBox(), Format(GearTrainLayoutCenterDistanceMM, "0.###") & " mm"
     On Error GoTo 0
+End Sub
+
+Private Sub optExternalGear_Click()
+    SyncGearTypeFromForm
+    ValidateInputs
+    UpdateGearCalculations
+End Sub
+
+Private Sub optInternalGear_Click()
+    SyncGearTypeFromForm
+    ValidateInputs
+    UpdateGearCalculations
 End Sub
 
 Private Sub optDrivingGear_Click()
@@ -583,7 +615,7 @@ Private Sub cbGenerate_Click()
     Dim Width As Double
     Dim ErrorMsg As String
 
-    If ControlExists("optDrivenGear") And optDrivenGear.Value Then
+    If GetOptionValue("optDrivenGear") Then
         GearTrainRole = GEAR_ROLE_DRIVEN
         If GearTrainDrivingPartTitle = "" Then
             ApplyDrivingGearFromComboSelection
@@ -641,6 +673,22 @@ Private Sub cbGenerate_Click()
         On Error GoTo 0
     End If
 
+    SyncGearTypeFromForm
+
+    If GetOptionValue("optDrivenGear") And GearTrainDrivingTeeth > 0 Then
+        If GearTrainDrivingIsInternal Xor GearGeom.IsInternal Then
+            If GearTrainDrivingIsInternal Then
+                If GearTrainDrivingTeeth <= NumTeeth Then
+                    ErrorMsg = ErrorMsg & "Internal driving gear needs more teeth than the driven pinion." & vbCrLf
+                End If
+            ElseIf GearGeom.IsInternal Then
+                If NumTeeth <= GearTrainDrivingTeeth Then
+                    ErrorMsg = ErrorMsg & "Internal driven gear needs more teeth than the driving pinion." & vbCrLf
+                End If
+            End If
+        End If
+    End If
+
     If ErrorMsg <> "" Then
         MsgBox "Please correct the following errors:" & vbCrLf & vbCrLf & ErrorMsg, vbExclamation, "Validation Error"
         Exit Sub
@@ -685,13 +733,19 @@ Private Sub ValidateInputs()
     If Not tbTeeth Is Nothing Then tbTeeth.BackColor = vbWhite
     If Not tbWidth Is Nothing Then tbWidth.BackColor = vbWhite
 
+    SyncGearTypeFromForm
+
     If Not tbTeeth Is Nothing And Not tbPressureAngle Is Nothing And Trim(tbTeeth.Text) <> "" And Trim(tbPressureAngle.Text) <> "" Then
         NumTeeth = CInt(tbTeeth.Text)
         PressureAngle = CDbl(tbPressureAngle.Text)
         If NumTeeth > 0 And PressureAngle > 0 Then
             PressureAngleRad = PressureAngle * Pi / 180
             MinTeeth = 2 / (Sin(PressureAngleRad) ^ 2)
-            If NumTeeth < MinTeeth Then tbTeeth.BackColor = RGB(255, 200, 200)
+            If GearGeom.IsInternal Then
+                If NumTeeth < MinTeeth + 1 Then tbTeeth.BackColor = RGB(255, 200, 200)
+            Else
+                If NumTeeth < MinTeeth Then tbTeeth.BackColor = RGB(255, 200, 200)
+            End If
         End If
     End If
 
@@ -721,20 +775,25 @@ Private Sub UpdateGearCalculations()
         NumTeeth = CInt(tbTeeth.Text)
         On Error GoTo 0
         If Module > 0 And NumTeeth > 0 Then
-            PitchDiameter = Module * NumTeeth
-            InfoText = "Pitch Diameter: " & Format(PitchDiameter, "0.000") & " mm"
+            SyncGearTypeFromForm
+            GearGeom.ModuleMM = Module
+            GearGeom.NumTeeth = NumTeeth
+            If Trim(tbPressureAngle.Text) <> "" Then GearGeom.PressureAngleDeg = CDbl(tbPressureAngle.Text)
+            CalculateGearGeometry
+
+            PitchDiameter = GearGeom.PitchDiameterMM
+            AddendumDiameter = GearGeom.AddendumDiameterMM
+            DedendumDiameter = GearGeom.DedendumDiameterMM
+            BaseDiameter = GearGeom.BaseDiameterMM
+
+            InfoText = IIf(GearGeom.IsInternal, "Internal ring gear. ", "") & "Pitch Diameter: " & Format(PitchDiameter, "0.000") & " mm"
             UpdateLabel "lblPitchDiameter", Format(PitchDiameter, "0.000") & " mm"
-            AddendumDiameter = PitchDiameter + 2 * Module
-            DedendumDiameter = PitchDiameter - 2.5 * Module
-            UpdateLabel "lblAddendumDiameter", Format(AddendumDiameter, "0.000") & " mm"
-            UpdateLabel "lblDedendumDiameter", Format(DedendumDiameter, "0.000") & " mm"
-            If Trim(tbPressureAngle.Text) <> "" Then
-                PressureAngle = CDbl(tbPressureAngle.Text)
-                BaseDiameter = PitchDiameter * Cos(PressureAngle * Pi / 180)
-                UpdateLabel "lblBaseDiameter", Format(BaseDiameter, "0.000") & " mm"
-            End If
-            If ControlExists("optDrivenGear") And optDrivenGear.Value And GearTrainDrivingTeeth > 0 Then
-                CenterDistance = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, NumTeeth)
+            UpdateLabel "lblAddendumDiameter", Format(AddendumDiameter, "0.000") & " mm (tip)"
+            UpdateLabel "lblDedendumDiameter", Format(DedendumDiameter, "0.000") & " mm (root)"
+            UpdateLabel "lblBaseDiameter", Format(BaseDiameter, "0.000") & " mm"
+            If ControlExists("optDrivenGear") And GetOptionValue("optDrivenGear") And GearTrainDrivingTeeth > 0 Then
+                CenterDistance = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, NumTeeth, _
+                    GearTrainDrivingIsInternal, GearGeom.IsInternal)
                 UpdateLabel "lblCenterDistance", Format(CenterDistance, "0.000") & " mm"
                 UpdateTextBox "tbTrainCenter", Format(CenterDistance, "0.000") & " mm"
                 UpdateAdjustedCenterDistance CenterDistance
@@ -763,7 +822,7 @@ Private Sub cbGearTrain_Click()
         tbModule.Enabled = False
         tbPressureAngle.Enabled = False
     Else
-        If Not (ControlExists("optDrivenGear") And optDrivenGear.Value) Then
+        If Not GetOptionValue("optDrivenGear") Then
             tbModule.Enabled = True
             tbPressureAngle.Enabled = True
         End If

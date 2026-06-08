@@ -41,7 +41,11 @@ Public Type GearGeometry
     DedendumRadiusM As Double
     WidthM As Double
     BaseLargerThanRoot As Boolean
+    IsInternal As Boolean
 End Type
+
+Public Const GEAR_TYPE_EXTERNAL As Long = 0
+Public Const GEAR_TYPE_INTERNAL As Long = 1
 
 Public GearGeom As GearGeometry
 Public Const MM_PER_M As Double = 1000#
@@ -79,6 +83,7 @@ Public GearTrainDrivingModuleMM As Double
 Public GearTrainDrivingTeeth As Long
 Public GearTrainDrivingPressureDeg As Double
 Public GearTrainDrivingWidthMM As Double
+Public GearTrainDrivingIsInternal As Boolean
 Public GearTrainCenterDistanceMM As Double
 Public GearTrainLayoutCenterDistanceMM As Double
 
@@ -104,7 +109,9 @@ Sub main()
     GearTrainDrivingPartTitle = ""
     GearTrainDrivingBodyLabel = ""
     GearTrainDrivingAxisName = ""
+    GearTrainDrivingIsInternal = False
     GearTrainLayoutCenterDistanceMM = 0#
+    GearGeom.IsInternal = False
     Load UserForm1
     gbGearFormOpen = True
     UserForm1.Show vbModeless
