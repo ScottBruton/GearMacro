@@ -2,7 +2,7 @@
 ' Workflow: axis -> addendum blank boss -> tooth-gap sketch -> cut extrude -> circular pattern cut
 '
 ' Requires Involute1 module: GearGeometry type, GearGeom, Pi, swApp globals, GenerateGear
-' Requires Tooth module: CreateToothGapSketch, Tooth_ResetBuildRefs, GetGapSketchFeatName
+' Requires Tooth module: CreateToothGapSketch, Tooth_ResetBuildRefs, GetGapSketchFeatName, GetGapFlankAHorizAngleDeg
 
 Public DebugLog As String
 Private mFrontPlaneName As String
@@ -38,6 +38,8 @@ Public Const GEAR_DIM_NUM_TEETH As String = "InvoluteGear_NumTeeth"
 Public Const GEAR_DIM_PRESSURE_ANGLE As String = "InvoluteGear_PressureAngle"
 Public Const GEAR_DIM_WIDTH As String = "InvoluteGear_Width"
 Public Const GEAR_DIM_PITCH_DIAMETER As String = "InvoluteGear_PitchDiameter"
+Public Const GEAR_DIM_GAP_PITCH_ANGLE As String = "InvoluteGear_GapPitchAngle"
+Public Const GEAR_DIM_GAP_FLANK_A_HORZ_ANGLE As String = "InvoluteGear_GapFlankA_HorizAngle"
 
 Public Const GEAR_PROP_MODULE As String = "InvoluteGear_Module"
 Public Const GEAR_PROP_TEETH As String = "InvoluteGear_Teeth"
@@ -571,6 +573,7 @@ Public Sub CreateGearGlobalVariableEquations()
     AddOrUpdateGlobalEquation GearGlobalVarName("Module"), Format(GearGeom.ModuleMM, "0.####")
     AddOrUpdateGlobalEquation GearGlobalVarName("Teeth"), CStr(GearGeom.NumTeeth)
     AddOrUpdateGlobalEquation GearGlobalVarName("Width"), Format(GearGeom.WidthMM, "0.####")
+    AddOrUpdateGlobalEquation GearGlobalVarName("GapFlankAHorizAngle"), Format(GetGapFlankAHorizAngleDeg(), "0.########")
 End Sub
 
 Private Function BuildGearDiameterEquationRhs(ByVal isAddendum As Boolean) As String
@@ -614,6 +617,21 @@ Private Sub TryLinkPatternInstanceEquation()
     End If
 End Sub
 
+Private Sub LinkGapSketchAngularEquations()
+    Dim skName As String
+    Dim qZ As String
+    Dim qFlankA As String
+
+    skName = GetGapSketchFeatName()
+    If skName = "" Then Exit Sub
+
+    qZ = EqQuotedName(GearGlobalVarName("Teeth"))
+    qFlankA = EqQuotedName(GearGlobalVarName("GapFlankAHorizAngle"))
+    AddOrUpdateGlobalEquation GearGlobalVarName("GapFlankAHorizAngle"), Format(GetGapFlankAHorizAngleDeg(), "0.########")
+    AddOrUpdateDimensionEquation GEAR_DIM_GAP_PITCH_ANGLE & "@" & skName, "180/" & qZ
+    AddOrUpdateDimensionEquation GEAR_DIM_GAP_FLANK_A_HORZ_ANGLE & "@" & skName, qFlankA
+End Sub
+
 Public Sub LinkGearSketchDiameterEquations()
     On Error Resume Next
     If swPart Is Nothing Then Exit Sub
@@ -627,6 +645,8 @@ Public Sub LinkGearSketchDiameterEquations()
         LinkSketchDiameterEquation GEAR_DIM_DEDENDUM_DIAMETER, GetGapSketchFeatName(), False
         LinkSketchDiameterEquation GEAR_DIM_ADDENDUM_DIAMETER, GetGapSketchFeatName(), True
     End If
+
+    LinkGapSketchAngularEquations
 
     Dim swEqnMgr As SldWorks.EquationMgr
     Set swEqnMgr = swPart.GetEquationMgr
