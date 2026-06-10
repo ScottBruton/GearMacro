@@ -2,6 +2,7 @@
 ' Workflow: axis -> addendum blank boss -> tooth-gap sketch -> cut extrude -> circular pattern cut
 '
 ' Requires Involute1 module: GearGeometry type, GearGeom, Pi, swApp globals, GenerateGear
+' Requires Tooth module: CreateToothGapSketch, Tooth_ResetBuildRefs, GetGapSketchFeatName
 
 Public DebugLog As String
 Private mFrontPlaneName As String
@@ -11,9 +12,6 @@ Private mSketchOffsetYM As Double
 Private mBossStartOffsetZM As Double
 Private mCurrentGearIndex As Long
 Private mBlankSketchFeatName As String
-Private mGapSketchFeatName As String
-Private mGapDaConstrCircle As SldWorks.SketchSegment
-Private mGapDdConstrCircle As SldWorks.SketchSegment
 Private mGearSolidBodyCountBefore As Long
 Private mUseSketchCenterlineAsAxis As Boolean
 Private mPatternAxisLineId As String
@@ -69,25 +67,26 @@ Public Sub ResetGearSketchOffset()
     mDrivenPatternUsesBossFace = False
 End Sub
 
+Public Function GetSketchOffsetXM() As Double
+    GetSketchOffsetXM = mSketchOffsetXM
+End Function
+
+Public Function GetSketchOffsetYM() As Double
+    GetSketchOffsetYM = mSketchOffsetYM
+End Function
+
 ' Clear feature refs from a prior GenerateGear run (avoid reusing last driven gear axis/cut)
 Public Sub ResetGearBuildFeatureRefs()
     mAxisName = ""
     mFrontPlaneName = ""
     Set swGearAxisFeat = Nothing
     Set swAddendumExtrudeFeat = Nothing
-    Set swToothGapSketchFeat = Nothing
     Set swToothCutFeat = Nothing
     Set swPatternFeat = Nothing
     Set swCombineFeat = Nothing
     Set swFrontPlaneFeat = Nothing
-    Set swInvoluteSpline = Nothing
-    Set swMirroredInvoluteSpline = Nothing
-    Set swTipLandArc = Nothing
-    Set swRootArc = Nothing
-    Set mGapDaConstrCircle = Nothing
-    Set mGapDdConstrCircle = Nothing
+    Tooth_ResetBuildRefs
     mBlankSketchFeatName = ""
-    mGapSketchFeatName = ""
     mCurrentGearIndex = 0
 End Sub
 
@@ -621,12 +620,12 @@ Public Sub LinkGearSketchDiameterEquations()
 
     If GearGeom.IsInternal Then
         LinkSketchDiameterEquation GEAR_DIM_DEDENDUM_DIAMETER, mBlankSketchFeatName, False
-        LinkSketchDiameterEquation GEAR_DIM_ADDENDUM_DIAMETER, mGapSketchFeatName, True
-        LinkSketchDiameterEquation GEAR_DIM_DEDENDUM_DIAMETER, mGapSketchFeatName, False
+        LinkSketchDiameterEquation GEAR_DIM_ADDENDUM_DIAMETER, GetGapSketchFeatName(), True
+        LinkSketchDiameterEquation GEAR_DIM_DEDENDUM_DIAMETER, GetGapSketchFeatName(), False
     Else
         LinkSketchDiameterEquation GEAR_DIM_ADDENDUM_DIAMETER, mBlankSketchFeatName, True
-        LinkSketchDiameterEquation GEAR_DIM_DEDENDUM_DIAMETER, mGapSketchFeatName, False
-        LinkSketchDiameterEquation GEAR_DIM_ADDENDUM_DIAMETER, mGapSketchFeatName, True
+        LinkSketchDiameterEquation GEAR_DIM_DEDENDUM_DIAMETER, GetGapSketchFeatName(), False
+        LinkSketchDiameterEquation GEAR_DIM_ADDENDUM_DIAMETER, GetGapSketchFeatName(), True
     End If
 
     Dim swEqnMgr As SldWorks.EquationMgr
@@ -915,11 +914,11 @@ Private Function MMToM(ByVal valueMM As Double) As Double
     MMToM = valueMM / MM_PER_M
 End Function
 
-Private Sub ClearSWSelection()
+Public Sub ClearSWSelection()
     swDoc.ClearSelection2 True
 End Sub
 
-Private Sub RebuildSWPart()
+Public Sub RebuildSWPart()
     swDoc.EditRebuild3
 End Sub
 
@@ -993,7 +992,7 @@ End Function
 
 ' Start sketch on front plane - original: RefPlaneFt(1).Select True, InsertSketch True
 ' NOTE: Feature.Select is a Sub in SW VBA - do NOT test its return value (always False wrongly)
-Private Function BeginSketchOnFrontPlane() As Boolean
+Public Function BeginSketchOnFrontPlane() As Boolean
     Dim selCount As Long
 
     BeginSketchOnFrontPlane = False
@@ -1348,7 +1347,7 @@ Private Function FindAddendumCylindricalFace() As SldWorks.Face2
 End Function
 
 ' Ref axis normal to gear face through driven centre — from cylindrical face of addendum blank (reliable when Axis1 exists)
-Private Sub SyncSketchOffsetFromAddendumBossCenter()
+Public Sub SyncSketchOffsetFromAddendumBossCenter()
     Dim swFace As SldWorks.Face2
     Dim swSurf As SldWorks.Surface
     Dim cylParams As Variant
@@ -1477,7 +1476,7 @@ Private Function SelectLastSketchForExtrude() As Boolean
     On Error GoTo 0
 End Function
 
-Private Function FindLastSketchFeature() As SldWorks.Feature
+Public Function FindLastSketchFeature() As SldWorks.Feature
     Dim ft As SldWorks.Feature
     Dim lastSk As SldWorks.Feature
     Set ft = swDoc.FirstFeature
@@ -1582,7 +1581,7 @@ Public Function CreateOrResetPart() As Boolean
 End Function
 
 ' Sketch-plane gear centre from addendum boss cylinder — same source as spline offset (not ref-axis params)
-Private Function GetGearAxisCenterOnSketchM(ByRef xM As Double, ByRef yM As Double) As Boolean
+Public Function GetGearAxisCenterOnSketchM(ByRef xM As Double, ByRef yM As Double) As Boolean
     SyncSketchOffsetFromAddendumBossCenter
     xM = mSketchOffsetXM
     yM = mSketchOffsetYM
@@ -1606,7 +1605,7 @@ Private Function SelectGearRefAxisForSketchConvert() As Boolean
 End Function
 
 ' Anchor a sketch point on the gear axis (Origin for first driving gear; pierce ref axis otherwise)
-Private Function EnsureAxisAnchorPointInActiveSketch() As Boolean
+Public Function EnsureAxisAnchorPointInActiveSketch() As Boolean
     Dim xA As Double
     Dim yA As Double
     Dim swPt As SldWorks.SketchPoint
@@ -1690,7 +1689,7 @@ Private Sub ConstrainSketchPointConcentricToCircle(ByVal swPt As SldWorks.Sketch
 End Sub
 
 ' Arc or circle centre concentric to gear axis (Origin for first driving gear; else ref-axis anchor)
-Private Sub ConstrainArcOrCircleCenterToAxis(ByVal swArcOrCircle As SldWorks.SketchSegment)
+Public Sub ConstrainArcOrCircleCenterToAxis(ByVal swArcOrCircle As SldWorks.SketchSegment)
     On Error Resume Next
     If swArcOrCircle Is Nothing Then Exit Sub
     ConstrainGearCircleCenterToAxis swArcOrCircle
@@ -1716,7 +1715,7 @@ Private Function ConstrainGearCircleCenterToOrigin(ByVal swCircle As SldWorks.Sk
 End Function
 
 ' Circle centre concentric to ref axis (projected point on Front sketch plane)
-Private Sub ConstrainGearCircleCenterToAxis(ByVal swCircle As SldWorks.SketchSegment)
+Public Sub ConstrainGearCircleCenterToAxis(ByVal swCircle As SldWorks.SketchSegment)
     Dim swPt As SldWorks.SketchPoint
     Dim xA As Double
     Dim yA As Double
@@ -1743,14 +1742,7 @@ Private Sub ConstrainGearCircleCenterToAxis(ByVal swCircle As SldWorks.SketchSeg
     On Error GoTo 0
 End Sub
 
-Private Sub ConstrainConstructionCircleToAxisPoint(ByVal swCircle As SldWorks.SketchSegment)
-    On Error Resume Next
-    If swCircle Is Nothing Then Exit Sub
-    ConstrainGearCircleCenterToAxis swCircle
-    On Error GoTo 0
-End Sub
-
-Private Sub ConstrainSketchSegmentsCoradial(ByVal swArcOrCircle1 As SldWorks.SketchSegment, _
+Public Sub ConstrainSketchSegmentsCoradial(ByVal swArcOrCircle1 As SldWorks.SketchSegment, _
     ByVal swArcOrCircle2 As SldWorks.SketchSegment)
     On Error Resume Next
     If swArcOrCircle1 Is Nothing Or swArcOrCircle2 Is Nothing Then Exit Sub
@@ -1762,7 +1754,7 @@ Private Sub ConstrainSketchSegmentsCoradial(ByVal swArcOrCircle1 As SldWorks.Ske
     On Error GoTo 0
 End Sub
 
-Private Sub ConstrainSketchSegmentsConcentric(ByVal swCircle1 As SldWorks.SketchSegment, _
+Public Sub ConstrainSketchSegmentsConcentric(ByVal swCircle1 As SldWorks.SketchSegment, _
     ByVal swCircle2 As SldWorks.SketchSegment)
     On Error Resume Next
     If swCircle1 Is Nothing Or swCircle2 Is Nothing Then Exit Sub
@@ -1774,7 +1766,7 @@ Private Sub ConstrainSketchSegmentsConcentric(ByVal swCircle1 As SldWorks.Sketch
     On Error GoTo 0
 End Sub
 
-Private Sub ConstrainTangentSketchSegments(ByVal swSeg1 As SldWorks.SketchSegment, ByVal swSeg2 As SldWorks.SketchSegment)
+Public Sub ConstrainTangentSketchSegments(ByVal swSeg1 As SldWorks.SketchSegment, ByVal swSeg2 As SldWorks.SketchSegment)
     On Error Resume Next
     If swSeg1 Is Nothing Or swSeg2 Is Nothing Then Exit Sub
     ClearSWSelection
@@ -1784,62 +1776,6 @@ Private Sub ConstrainTangentSketchSegments(ByVal swSeg1 As SldWorks.SketchSegmen
     ClearSWSelection
     On Error GoTo 0
 End Sub
-
-Private Sub CoincidentSketchPointToCircle(ByVal swSeg As SldWorks.SketchSegment, ByVal useEnd As Boolean, _
-    ByVal swCircle As SldWorks.SketchSegment)
-    Dim sp As SldWorks.SketchPoint
-    On Error Resume Next
-    If swSeg Is Nothing Or swCircle Is Nothing Then Exit Sub
-    If useEnd Then Set sp = swSeg.GetEndPoint2 Else Set sp = swSeg.GetStartPoint2
-    If sp Is Nothing Then Exit Sub
-    ClearSWSelection
-    sp.Select4 False, Nothing
-    swCircle.Select4 True, Nothing
-    swDoc.SketchAddConstraints "sgCOINCIDENT"
-    ClearSWSelection
-    On Error GoTo 0
-End Sub
-
-Private Sub ReadSplineEndpointCoordsM(ByVal swSeg As SldWorks.SketchSegment, ByVal useEnd As Boolean, _
-    ByRef xM As Double, ByRef yM As Double)
-    Dim sp As SldWorks.SketchPoint
-    On Error Resume Next
-    If useEnd Then Set sp = swSeg.GetEndPoint2 Else Set sp = swSeg.GetStartPoint2
-    If Not sp Is Nothing Then
-        xM = sp.X
-        yM = sp.Y
-    End If
-    On Error GoTo 0
-End Sub
-
-Private Sub ConstrainGapEndpointsToConstructionCircles()
-    On Error Resume Next
-    If mGapDaConstrCircle Is Nothing Or mGapDdConstrCircle Is Nothing Then Exit Sub
-    If swInvoluteSpline Is Nothing Or swMirroredInvoluteSpline Is Nothing Then Exit Sub
-    swSketchManager.AutoSolve = True
-    CoincidentSketchPointToCircle swInvoluteSpline, False, mGapDdConstrCircle
-    CoincidentSketchPointToCircle swInvoluteSpline, True, mGapDaConstrCircle
-    CoincidentSketchPointToCircle swMirroredInvoluteSpline, False, mGapDdConstrCircle
-    CoincidentSketchPointToCircle swMirroredInvoluteSpline, True, mGapDaConstrCircle
-    DebugPrint "ConstrainGapEndpointsToConstructionCircles OK"
-    On Error GoTo 0
-End Sub
-
-Private Function CreateGapConstructionCircleAtAxis(ByVal radiusM As Double, ByVal dimName As String, _
-    ByVal diameterMM As Double) As SldWorks.SketchSegment
-    Dim cx As Double
-    Dim cy As Double
-
-    Set CreateGapConstructionCircleAtAxis = Nothing
-    On Error Resume Next
-    GetGearAxisCenterOnSketchM cx, cy
-    Set CreateGapConstructionCircleAtAxis = swSketchManager.CreateCircle(cx, cy, 0, cx + radiusM, cy, 0)
-    If CreateGapConstructionCircleAtAxis Is Nothing Then Exit Function
-    CreateGapConstructionCircleAtAxis.ConstructionGeometry = True
-    AddDiameterDimensionToCircle CreateGapConstructionCircleAtAxis, dimName, diameterMM
-    ConstrainConstructionCircleToAxisPoint CreateGapConstructionCircleAtAxis
-    On Error GoTo 0
-End Function
 
 ' ---------------------------------------------------------------------------
 ' 4. CreateAddendumBlank - full disk at outer (addendum) diameter
@@ -1967,59 +1903,6 @@ BoreFail:
     CutInternalGearBore = False
 End Function
 
-' ---------------------------------------------------------------------------
-' 5. GenerateInvolutePoints - one flank, meters, parametric involute
-' ---------------------------------------------------------------------------
-Public Function GenerateInvolutePoints(ByRef outPoints() As Double, ByRef pointCount As Long) As Boolean
-    On Error GoTo GenPtsFail
-
-    Dim i As Long
-    Dim t As Double
-    Dim rb As Double
-    Dim x As Double
-    Dim y As Double
-    Dim rotAngle As Double
-    Dim tPitch As Double
-    Dim xPitch As Double
-    Dim yPitch As Double
-    Dim phiPitch As Double
-
-    rb = GearGeom.BaseRadiusM
-    pointCount = INVOLUTE_POINT_COUNT
-    ReDim outPoints(0 To pointCount * 3 - 1)
-
-    InvoluteXY GearGeom.InvoluteTPitch, rb, xPitch, yPitch
-    phiPitch = Atn2(yPitch, xPitch)
-    rotAngle = GearGeom.HalfToothAngleRad - phiPitch
-
-    For i = 0 To pointCount - 1
-        If pointCount = 1 Then
-            t = GearGeom.InvoluteTStart
-        Else
-            t = GearGeom.InvoluteTStart + (GearGeom.InvoluteTEnd - GearGeom.InvoluteTStart) * CDbl(i) / CDbl(pointCount - 1)
-        End If
-        InvoluteXY t, rb, x, y
-        RotatePoint x, y, rotAngle, x, y
-        If GearGeom.IsInternal Then RotatePoint x, y, Pi, x, y
-        outPoints(i * 3) = x
-        outPoints(i * 3 + 1) = y
-        outPoints(i * 3 + 2) = 0#
-    Next i
-
-    DebugPrint "GenerateInvolutePoints OK (" & pointCount & " points, rot=" & Format(rotAngle * 180# / Pi, "0.###") & _
-        " deg" & IIf(GearGeom.IsInternal, ", internal", "") & ")"
-    GenerateInvolutePoints = True
-    Exit Function
-
-GenPtsFail:
-    DebugPrint "GenerateInvolutePoints FAIL: " & Err.Description
-    GenerateInvolutePoints = False
-End Function
-
-Private Sub InvoluteXY(ByVal t As Double, ByVal rb As Double, ByRef x As Double, ByRef y As Double)
-    x = rb * (Cos(t) + t * Sin(t))
-    y = rb * (Sin(t) - t * Cos(t))
-End Sub
 
 ' VBA has no built-in Atn2 (unlike VB.NET); required for involute arc angles
 Public Function Atn2(ByVal y As Double, ByVal x As Double) As Double
@@ -2048,234 +1931,7 @@ Public Sub RotatePoint(ByVal xIn As Double, ByVal yIn As Double, ByVal angleRad 
     yOut = xIn * s + yIn * c
 End Sub
 
-' Force point onto circle (keeps angle); ties spline ends to addendum / dedendum
-Private Sub SnapPointToRadius(ByVal rTarget As Double, ByRef x As Double, ByRef y As Double)
-    Dim r As Double
-    r = Sqr(x * x + y * y)
-    If r > 0.0000000001 Then
-        x = rTarget * x / r
-        y = rTarget * y / r
-    End If
-End Sub
-
-' Minor arc between two angles (short way on circle — between teeth, not around the blank)
-Private Function ArcMidAngleShort(ByVal angStart As Double, ByVal angEnd As Double) As Double
-    Dim span As Double
-    span = angEnd - angStart
-    Do While span > Pi
-        span = span - 2# * Pi
-    Loop
-    Do While span <= -Pi
-        span = span + 2# * Pi
-    Loop
-    ArcMidAngleShort = angStart + span / 2#
-End Function
-
-Private Function CreateCircleArcBetween(ByVal r As Double, _
-    ByVal xStart As Double, ByVal yStart As Double, _
-    ByVal xEnd As Double, ByVal yEnd As Double) As SldWorks.SketchSegment
-    Dim angS As Double, angE As Double, angM As Double
-    Dim cx As Double, cy As Double
-    GetGearAxisCenterOnSketchM cx, cy
-    angS = Atn2(yStart - cy, xStart - cx)
-    angE = Atn2(yEnd - cy, xEnd - cx)
-    angM = ArcMidAngleShort(angS, angE)
-    Set CreateCircleArcBetween = swSketchManager.Create3PointArc( _
-        xStart, yStart, 0, xEnd, yEnd, 0, _
-        cx + r * Cos(angM), cy + r * Sin(angM), 0)
-End Function
-
-Private Sub OffsetSketchPointArray(ByRef pts() As Double, ByVal n As Long)
-    Dim i As Long
-    For i = 0 To n - 1
-        pts(i * 3) = pts(i * 3) + mSketchOffsetXM
-        pts(i * 3 + 1) = pts(i * 3 + 1) + mSketchOffsetYM
-    Next i
-End Sub
-
-Private Sub SnapGapSplineEndsToCircles(ByRef ptsFlank() As Double, ByVal n As Long, ByVal ra As Double, ByVal rr As Double)
-    SnapPointToRadius rr, ptsFlank(0), ptsFlank(1)
-    SnapPointToRadius ra, ptsFlank((n - 1) * 3), ptsFlank((n - 1) * 3 + 1)
-End Sub
-
-' Coincident between spline end and arc end so the cut contour is closed
-Private Sub CoincidentSketchEnds(ByVal seg1 As SldWorks.SketchSegment, ByVal useEnd1 As Boolean, _
-    ByVal seg2 As SldWorks.SketchSegment, ByVal useEnd2 As Boolean)
-    Dim sp1 As SldWorks.SketchPoint
-    Dim sp2 As SldWorks.SketchPoint
-    On Error Resume Next
-    If useEnd1 Then Set sp1 = seg1.GetEndPoint2 Else Set sp1 = seg1.GetStartPoint2
-    If useEnd2 Then Set sp2 = seg2.GetEndPoint2 Else Set sp2 = seg2.GetStartPoint2
-    If sp1 Is Nothing Or sp2 Is Nothing Then Exit Sub
-    sp1.Select4 False, Nothing
-    sp2.Select4 True, Nothing
-    swDoc.SketchAddConstraints "sgCOINCIDENT"
-    ClearSWSelection
-    On Error GoTo 0
-End Sub
-
-Private Sub ConstrainGapSketchClosed()
-    On Error Resume Next
-    swSketchManager.AddToDB = False
-    swSketchManager.AutoSolve = True
-    ' Flank A: root=start, tip=end. Tip arc: start=high Y (A tip), end=B tip. Root arc: start=high Y root, end=B root
-    CoincidentSketchEnds swInvoluteSpline, False, swRootArc, False      ' A root -> root arc start
-    CoincidentSketchEnds swInvoluteSpline, True, swTipLandArc, False     ' A tip -> tip arc start
-    CoincidentSketchEnds swMirroredInvoluteSpline, True, swTipLandArc, True   ' B tip -> tip arc end
-    CoincidentSketchEnds swMirroredInvoluteSpline, False, swRootArc, True     ' B root -> root arc end
-    swSketchManager.AddToDB = True
-    On Error GoTo 0
-End Sub
-
-' Root arc on Dd; tip arc on Da (minor arc between flank ends, not around circumference)
-Private Function AddGapTipRootArcs(ByVal ra As Double, ByVal rr As Double, _
-    ByVal xRootA As Double, ByVal yRootA As Double, ByVal xRootB As Double, ByVal yRootB As Double, _
-    ByVal xTipA As Double, ByVal yTipA As Double, ByVal xTipB As Double, ByVal yTipB As Double) As Boolean
-
-    AddGapTipRootArcs = False
-
-    Set swRootArc = CreateCircleArcBetween(rr, xRootA, yRootA, xRootB, yRootB)
-    If swRootArc Is Nothing Then Exit Function
-
-    Set swTipLandArc = CreateCircleArcBetween(ra, xTipA, yTipA, xTipB, yTipB)
-    If swTipLandArc Is Nothing Then Exit Function
-
-    AddGapTipRootArcs = True
-End Function
-
-' ---------------------------------------------------------------------------
-' 7. CreateToothGapSketch - closed gap between teeth (material removed by cut)
-'    Flank A = right flank of reference tooth; Flank B = left flank of next tooth (+pitch)
-' ---------------------------------------------------------------------------
-Public Function CreateToothGapSketch() As Boolean
-    On Error GoTo SketchFail
-
-    Dim pts() As Double
-    Dim ptsRight() As Double
-    Dim ptsNextLeft() As Double
-    Dim n As Long
-    Dim i As Long
-    Dim ra As Double
-    Dim rr As Double
-    Dim pitch As Double
-    Dim x As Double
-    Dim y As Double
-    Dim xTipA As Double, yTipA As Double
-    Dim xTipB As Double, yTipB As Double
-    Dim xRootA As Double, yRootA As Double
-    Dim xRootB As Double, yRootB As Double
-    Dim sketchStep As String
-    Dim halfPitch As Double
-
-    sketchStep = "init"
-    If Not GenerateInvolutePoints(pts, n) Then GoTo SketchFail
-
-    ra = GearGeom.AddendumRadiusM
-    rr = GearGeom.DedendumRadiusM
-    pitch = GearGeom.AngularPitchRad
-    halfPitch = pitch / 2#
-
-    sketchStep = "begin sketch"
-    SyncSketchOffsetFromAddendumBossCenter
-    If Not BeginSketchOnFrontPlane() Then
-        DebugPrint "CreateToothGapSketch: BeginSketchOnFrontPlane failed"
-        GoTo SketchFail
-    End If
-    Set sw2DSketch = swSketchManager.ActiveSketch
-    EnsureAxisAnchorPointInActiveSketch
-
-    sketchStep = "construction circles"
-    Set mGapDaConstrCircle = CreateGapConstructionCircleAtAxis(ra, GEAR_DIM_ADDENDUM_DIAMETER, GearGeom.AddendumDiameterMM)
-    Set mGapDdConstrCircle = CreateGapConstructionCircleAtAxis(rr, GEAR_DIM_DEDENDUM_DIAMETER, GearGeom.DedendumDiameterMM)
-    If mGapDaConstrCircle Is Nothing Or mGapDdConstrCircle Is Nothing Then GoTo SketchFail
-    ConstrainSketchSegmentsConcentric mGapDaConstrCircle, mGapDdConstrCircle
-
-    ' Center gap on +X (reference tooth is at 0; gap center is at half pitch)
-    For i = 0 To n - 1
-        RotatePoint pts(i * 3), pts(i * 3 + 1), -halfPitch, pts(i * 3), pts(i * 3 + 1)
-    Next i
-
-    ' Right flank: root at index 0, tip at n-1 (dedendum -> addendum, same order as flank B)
-    sketchStep = "gap flank A"
-    ReDim ptsRight(0 To n * 3 - 1)
-    For i = 0 To n - 1
-        ptsRight(i * 3) = pts(i * 3)
-        ptsRight(i * 3 + 1) = -pts(i * 3 + 1)
-        ptsRight(i * 3 + 2) = 0#
-    Next i
-    SnapGapSplineEndsToCircles ptsRight, n, ra, rr
-
-    ' Left flank of next tooth (+one pitch); root index 0, tip index n-1
-    sketchStep = "gap flank B"
-    ReDim ptsNextLeft(0 To n * 3 - 1)
-    For i = 0 To n - 1
-        RotatePoint pts(i * 3), pts(i * 3 + 1), pitch, x, y
-        ptsNextLeft(i * 3) = x
-        ptsNextLeft(i * 3 + 1) = y
-        ptsNextLeft(i * 3 + 2) = 0#
-    Next i
-    SnapGapSplineEndsToCircles ptsNextLeft, n, ra, rr
-
-    OffsetSketchPointArray ptsRight, n
-    OffsetSketchPointArray ptsNextLeft, n
-
-    xRootA = ptsRight(0): yRootA = ptsRight(1)
-    xTipA = ptsRight((n - 1) * 3): yTipA = ptsRight((n - 1) * 3 + 1)
-    xRootB = ptsNextLeft(0): yRootB = ptsNextLeft(1)
-    xTipB = ptsNextLeft((n - 1) * 3): yTipB = ptsNextLeft((n - 1) * 3 + 1)
-
-    Set swInvoluteSpline = swSketchManager.CreateSpline(ptsRight)
-    If swInvoluteSpline Is Nothing Then GoTo SketchFail
-    Set swMirroredInvoluteSpline = swSketchManager.CreateSpline(ptsNextLeft)
-    If swMirroredInvoluteSpline Is Nothing Then GoTo SketchFail
-
-    sketchStep = "endpoints on Da/Dd"
-    ConstrainGapEndpointsToConstructionCircles
-    ReadSplineEndpointCoordsM swInvoluteSpline, False, xRootA, yRootA
-    ReadSplineEndpointCoordsM swInvoluteSpline, True, xTipA, yTipA
-    ReadSplineEndpointCoordsM swMirroredInvoluteSpline, False, xRootB, yRootB
-    ReadSplineEndpointCoordsM swMirroredInvoluteSpline, True, xTipB, yTipB
-
-    ' Arcs use solved spline corner coords on Da/Dd circles
-    sketchStep = "gap tip and root arcs"
-    If Not AddGapTipRootArcs(ra, rr, xRootA, yRootA, xRootB, yRootB, xTipA, yTipA, xTipB, yTipB) Then GoTo SketchFail
-
-    sketchStep = "arcs coradial with Da/Dd"
-    ConstrainSketchSegmentsCoradial swTipLandArc, mGapDaConstrCircle
-    ConstrainSketchSegmentsCoradial swRootArc, mGapDdConstrCircle
-    ConstrainArcOrCircleCenterToAxis swTipLandArc
-    ConstrainArcOrCircleCenterToAxis swRootArc
-
-    sketchStep = "coincident corners"
-    ConstrainGapSketchClosed
-
-    sketchStep = "spline tangent at arcs"
-    ConstrainTangentSketchSegments swInvoluteSpline, swRootArc
-    ConstrainTangentSketchSegments swInvoluteSpline, swTipLandArc
-    ConstrainTangentSketchSegments swMirroredInvoluteSpline, swTipLandArc
-    ConstrainTangentSketchSegments swMirroredInvoluteSpline, swRootArc
-
-    sketchStep = "capture sketch"
-    Set swToothGapSketchFeat = FindLastSketchFeature()
-    If swToothGapSketchFeat Is Nothing Then
-        DebugPrint "CreateToothGapSketch: could not get sketch feature"
-        GoTo SketchFail
-    End If
-    mGapSketchFeatName = swToothGapSketchFeat.Name
-
-    sketchStep = "exit sketch"
-    swSketchManager.InsertSketch True
-    ClearSWSelection
-    RebuildSWPart
-
-    DebugPrint "CreateToothGapSketch OK (gap pitch=" & Format(pitch * 180# / Pi, "0.###") & " deg)"
-    CreateToothGapSketch = True
-    Exit Function
-
-SketchFail:
-    DebugPrint "CreateToothGapSketch FAIL (" & sketchStep & "): " & Err.Number & " " & Err.Description
-    CreateToothGapSketch = False
-End Function
+' Tooth gap sketch: see Tooth module (CreateToothGapSketch)
 
 Private Function SelectGapSketchForCut() As Boolean
     Dim skName As String

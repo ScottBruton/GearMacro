@@ -1,0 +1,651 @@
+Option Explicit
+
+' Tooth gap sketch — involute flanks, root/tip arcs, connector lines
+' Copy into a standard module named "Tooth" in the VBA project.
+'
+' Depends on Involute1: GearGeom, Pi, MM_PER_M, swApp, swDoc, swPart, swSketchManager,
+'   swModelDocExt, sw2DSketch, swInvoluteSpline, swMirroredInvoluteSpline, swTipLandArc,
+'   swRootArc, swToothGapSketchFeat, INVOLUTE_POINT_COUNT
+' Depends on Module1 public helpers: BeginSketchOnFrontPlane, EnsureAxisAnchorPointInActiveSketch,
+'   SyncSketchOffsetFromAddendumBossCenter, GetGearAxisCenterOnSketchM, GetSketchOffsetXM/Y,
+'   ConstrainSketchSegmentsConcentric, ConstrainSketchSegmentsCoradial,
+'   ConstrainArcOrCircleCenterToAxis, ConstrainGearCircleCenterToAxis,
+'   ConstrainTangentSketchSegments, FindLastSketchFeature, ClearSWSelection, RebuildSWPart,
+'   AddDiameterDimensionToCircle, DebugPrint, Atn2, RotatePoint
+' Depends on Module1 constants: GEAR_DIM_ADDENDUM_DIAMETER, GEAR_DIM_DEDENDUM_DIAMETER
+
+Private mGapSketchFeatName As String
+Private mGapDaConstrCircle As SldWorks.SketchSegment
+Private mGapDdConstrCircle As SldWorks.SketchSegment
+Private mGapRootConnA As SldWorks.SketchSegment
+Private mGapRootConnB As SldWorks.SketchSegment
+Private mGapRootConstrA As SldWorks.SketchSegment
+Private mGapRootConstrB As SldWorks.SketchSegment
+Private mGapRootUndercutA As SldWorks.SketchSegment
+Private mGapRootUndercutB As SldWorks.SketchSegment
+Private mGapUseRootConnector As Boolean
+
+Public Sub Tooth_ResetBuildRefs()
+    Set swInvoluteSpline = Nothing
+    Set swMirroredInvoluteSpline = Nothing
+    Set swTipLandArc = Nothing
+    Set swRootArc = Nothing
+    Set swToothGapSketchFeat = Nothing
+    Set mGapDaConstrCircle = Nothing
+    Set mGapDdConstrCircle = Nothing
+    Set mGapRootConnA = Nothing
+    Set mGapRootConnB = Nothing
+    Set mGapRootConstrA = Nothing
+    Set mGapRootConstrB = Nothing
+    Set mGapRootUndercutA = Nothing
+    Set mGapRootUndercutB = Nothing
+    mGapUseRootConnector = False
+    mGapSketchFeatName = ""
+End Sub
+
+Public Function GetGapSketchFeatName() As String
+    GetGapSketchFeatName = mGapSketchFeatName
+End Function
+
+' ---------------------------------------------------------------------------
+' Legacy point-spline path (optional debug); gap sketch uses equation curves
+' ---------------------------------------------------------------------------
+Public Function GenerateInvolutePoints(ByRef outPoints() As Double, ByRef pointCount As Long) As Boolean
+    On Error GoTo GenPtsFail
+
+    Dim i As Long
+    Dim t As Double
+    Dim rb As Double
+    Dim x As Double
+    Dim y As Double
+    Dim rotAngle As Double
+    Dim xPitch As Double
+    Dim yPitch As Double
+    Dim phiPitch As Double
+
+    rb = GearGeom.BaseRadiusM
+    pointCount = INVOLUTE_POINT_COUNT
+    ReDim outPoints(0 To pointCount * 3 - 1)
+
+    InvoluteXY GearGeom.InvoluteTPitch, rb, xPitch, yPitch
+    phiPitch = Atn2(yPitch, xPitch)
+    rotAngle = GearGeom.HalfToothAngleRad - phiPitch
+
+    For i = 0 To pointCount - 1
+        If pointCount = 1 Then
+            t = GearGeom.InvoluteTStart
+        Else
+            t = GearGeom.InvoluteTStart + (GearGeom.InvoluteTEnd - GearGeom.InvoluteTStart) * CDbl(i) / CDbl(pointCount - 1)
+        End If
+        InvoluteXY t, rb, x, y
+        RotatePoint x, y, rotAngle, x, y
+        If GearGeom.IsInternal Then RotatePoint x, y, Pi, x, y
+        outPoints(i * 3) = x
+        outPoints(i * 3 + 1) = y
+        outPoints(i * 3 + 2) = 0#
+    Next i
+
+    DebugPrint "GenerateInvolutePoints OK (" & pointCount & " points, rot=" & Format(rotAngle * 180# / Pi, "0.###") & _
+        " deg" & IIf(GearGeom.IsInternal, ", internal", "") & ")"
+    GenerateInvolutePoints = True
+    Exit Function
+
+GenPtsFail:
+    DebugPrint "GenerateInvolutePoints FAIL: " & Err.Description
+    GenerateInvolutePoints = False
+End Function
+
+Private Sub InvoluteXY(ByVal t As Double, ByVal rb As Double, ByRef x As Double, ByRef y As Double)
+    x = rb * (Cos(t) + t * Sin(t))
+    y = rb * (Sin(t) - t * Cos(t))
+End Sub
+
+Private Function FormatEquationNumber(ByVal v As Double) As String
+    FormatEquationNumber = Replace(Format(v, "0.##########"), ",", ".")
+End Function
+
+Private Sub BuildInvoluteEquationExprs(ByVal rb As Double, ByVal rotRad As Double, ByVal mirrorY As Boolean, _
+    ByRef xExpr As String, ByRef yExpr As String)
+    Dim c As Double
+    Dim s As Double
+    Dim rbStr As String
+    Dim ySign As String
+
+    c = Cos(rotRad)
+    s = Sin(rotRad)
+    rbStr = FormatEquationNumber(rb)
+    ySign = IIf(mirrorY, "-", "")
+
+    xExpr = rbStr & "*((cos(t)+t*sin(t))*" & FormatEquationNumber(c) & "-(sin(t)-t*cos(t))*" & FormatEquationNumber(s) & ")"
+    yExpr = ySign & rbStr & "*((cos(t)+t*sin(t))*" & FormatEquationNumber(s) & "+(sin(t)-t*cos(t))*" & FormatEquationNumber(c) & ")"
+End Sub
+
+Private Sub GetInvoluteGapFlankRotRad(ByRef rotFlankA As Double, ByRef rotFlankB As Double)
+    Dim rb As Double
+    Dim xPitch As Double
+    Dim yPitch As Double
+    Dim phiPitch As Double
+    Dim rotAngle As Double
+    Dim halfPitch As Double
+
+    rb = GearGeom.BaseRadiusM
+    InvoluteXY GearGeom.InvoluteTPitch, rb, xPitch, yPitch
+    phiPitch = Atn2(yPitch, xPitch)
+    rotAngle = GearGeom.HalfToothAngleRad - phiPitch
+    halfPitch = GearGeom.AngularPitchRad / 2#
+    rotFlankA = rotAngle - halfPitch
+    rotFlankB = rotFlankA + GearGeom.AngularPitchRad
+    If GearGeom.IsInternal Then
+        rotFlankA = rotFlankA + Pi
+        rotFlankB = rotFlankB + Pi
+    End If
+End Sub
+
+Private Sub GetInvoluteFlankPointM(ByVal t As Double, ByVal rotRad As Double, ByVal mirrorY As Boolean, _
+    ByRef xM As Double, ByRef yM As Double)
+    Dim rb As Double
+    Dim x As Double
+    Dim y As Double
+
+    rb = GearGeom.BaseRadiusM
+    InvoluteXY t, rb, x, y
+    RotatePoint x, y, rotRad, x, y
+    If mirrorY Then y = -y
+    xM = x + GetSketchOffsetXM()
+    yM = y + GetSketchOffsetYM()
+End Sub
+
+Private Sub GetInvoluteFlankEndpointM(ByVal t As Double, ByVal rotRad As Double, ByVal mirrorY As Boolean, _
+    ByRef xM As Double, ByRef yM As Double)
+    ' Equation splines do not expose start/end via GetStartPoint2 — use parametric involute math (metres)
+    GetInvoluteFlankPointM t, rotRad, mirrorY, xM, yM
+End Sub
+
+Private Sub PrepareGapTipCoords(ByVal rotRad As Double, ByVal mirrorY As Boolean, ByVal ra As Double, _
+    ByRef xTip As Double, ByRef yTip As Double)
+    GetInvoluteFlankPointM GearGeom.InvoluteTEnd, rotRad, mirrorY, xTip, yTip
+    SnapPointToRadiusAboutCenterM ra, xTip, yTip
+End Sub
+
+Private Function CreateInvoluteFlankEquationSpline(ByVal rotRad As Double, ByVal mirrorY As Boolean) As SketchSegment
+    Dim xExpr As String
+    Dim yExpr As String
+    Dim tStart As String
+    Dim tEnd As String
+    Dim rb As Double
+    Dim xOffMM As Double
+    Dim yOffMM As Double
+    Dim x0M As Double
+    Dim y0M As Double
+    Dim x1M As Double
+    Dim y1M As Double
+
+    Set CreateInvoluteFlankEquationSpline = Nothing
+    rb = GearGeom.BaseRadiusMM
+    If rb <= 0# Then Exit Function
+
+    BuildInvoluteEquationExprs rb, rotRad, mirrorY, xExpr, yExpr
+    tStart = FormatEquationNumber(GearGeom.InvoluteTStart)
+    tEnd = FormatEquationNumber(GearGeom.InvoluteTEnd)
+    xOffMM = GetSketchOffsetXM() * MM_PER_M
+    yOffMM = GetSketchOffsetYM() * MM_PER_M
+
+    swSketchManager.AddToDB = True
+    On Error Resume Next
+    Set CreateInvoluteFlankEquationSpline = swSketchManager.CreateEquationSpline2( _
+        xExpr, yExpr, "", tStart, tEnd, False, 0#, xOffMM, yOffMM, False, False)
+    If Err.Number <> 0 Then
+        DebugPrint "CreateInvoluteFlankEquationSpline API error " & Err.Number & ": " & Err.Description
+        Err.Clear
+    End If
+    On Error GoTo 0
+
+    If CreateInvoluteFlankEquationSpline Is Nothing Then
+        DebugPrint "CreateInvoluteFlankEquationSpline FAIL rot=" & Format(rotRad * 180# / Pi, "0.###") & _
+            " deg mirrorY=" & mirrorY & " t=[" & tStart & "," & tEnd & "]"
+    Else
+        GetInvoluteFlankEndpointM GearGeom.InvoluteTStart, rotRad, mirrorY, x0M, y0M
+        GetInvoluteFlankEndpointM GearGeom.InvoluteTEnd, rotRad, mirrorY, x1M, y1M
+        DebugPrint "CreateInvoluteFlankEquationSpline OK rot=" & Format(rotRad * 180# / Pi, "0.###") & _
+            " deg mirrorY=" & mirrorY & " rb=" & FormatEquationNumber(rb) & " mm t=[" & tStart & "," & tEnd & "]" & _
+            " computed start=" & FormatPointMM(x0M, y0M) & " end=" & FormatPointMM(x1M, y1M)
+    End If
+End Function
+
+Private Function ArcMidAngleShort(ByVal angStart As Double, ByVal angEnd As Double) As Double
+    Dim span As Double
+    span = angEnd - angStart
+    Do While span > Pi
+        span = span - 2# * Pi
+    Loop
+    Do While span <= -Pi
+        span = span + 2# * Pi
+    Loop
+    ArcMidAngleShort = angStart + span / 2#
+End Function
+
+Private Function CreateCircleArcBetween(ByVal r As Double, _
+    ByVal xStart As Double, ByVal yStart As Double, _
+    ByVal xEnd As Double, ByVal yEnd As Double) As SldWorks.SketchSegment
+    Dim angS As Double
+    Dim angE As Double
+    Dim angM As Double
+    Dim cx As Double
+    Dim cy As Double
+
+    GetGearAxisCenterOnSketchM cx, cy
+    angS = Atn2(yStart - cy, xStart - cx)
+    angE = Atn2(yEnd - cy, xEnd - cx)
+    angM = ArcMidAngleShort(angS, angE)
+    Set CreateCircleArcBetween = swSketchManager.Create3PointArc( _
+        xStart, yStart, 0, xEnd, yEnd, 0, _
+        cx + r * Cos(angM), cy + r * Sin(angM), 0)
+End Function
+
+Private Sub ReadSplineEndpointCoordsM(ByVal swSeg As SldWorks.SketchSegment, ByVal useEnd As Boolean, _
+    ByRef xM As Double, ByRef yM As Double)
+    Dim sp As SldWorks.SketchPoint
+    On Error Resume Next
+    If useEnd Then Set sp = swSeg.GetEndPoint2 Else Set sp = swSeg.GetStartPoint2
+    If Not sp Is Nothing Then
+        xM = sp.X
+        yM = sp.Y
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Sub CoincidentSketchEnds(ByVal seg1 As SldWorks.SketchSegment, ByVal useEnd1 As Boolean, _
+    ByVal seg2 As SldWorks.SketchSegment, ByVal useEnd2 As Boolean)
+    Dim sp1 As SldWorks.SketchPoint
+    Dim sp2 As SldWorks.SketchPoint
+    On Error Resume Next
+    If useEnd1 Then Set sp1 = seg1.GetEndPoint2 Else Set sp1 = seg1.GetStartPoint2
+    If useEnd2 Then Set sp2 = seg2.GetEndPoint2 Else Set sp2 = seg2.GetStartPoint2
+    If sp1 Is Nothing Or sp2 Is Nothing Then Exit Sub
+    sp1.Select4 False, Nothing
+    sp2.Select4 True, Nothing
+    swDoc.SketchAddConstraints "sgCOINCIDENT"
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+Private Function InvoluteGapNeedsRootConnector() As Boolean
+    InvoluteGapNeedsRootConnector = (GearGeom.DedendumRadiusMM + 0.0001 < GearGeom.BaseRadiusMM)
+End Function
+
+Private Sub SnapPointToRadiusAboutCenterM(ByVal rTargetM As Double, ByRef xM As Double, ByRef yM As Double)
+    Dim cx As Double
+    Dim cy As Double
+    Dim dx As Double
+    Dim dy As Double
+    Dim r As Double
+
+    cx = GetSketchOffsetXM()
+    cy = GetSketchOffsetYM()
+    dx = xM - cx
+    dy = yM - cy
+    r = Sqr(dx * dx + dy * dy)
+    If r > 0.0000000001 Then
+        xM = cx + rTargetM * dx / r
+        yM = cy + rTargetM * dy / r
+    End If
+End Sub
+
+Private Sub PrepareGapRootCoords(ByVal rotRad As Double, ByVal mirrorY As Boolean, ByVal rr As Double, _
+    ByRef xRoot As Double, ByRef yRoot As Double)
+    GetInvoluteFlankPointM GearGeom.InvoluteTStart, rotRad, mirrorY, xRoot, yRoot
+    SnapPointToRadiusAboutCenterM rr, xRoot, yRoot
+End Sub
+
+Private Function FormatCoordMM(ByVal coordM As Double) As String
+    FormatCoordMM = Format(coordM * MM_PER_M, "0.####")
+End Function
+
+Private Function FormatPointMM(ByVal xM As Double, ByVal yM As Double) As String
+    FormatPointMM = "(" & FormatCoordMM(xM) & ", " & FormatCoordMM(yM) & ") mm"
+End Function
+
+Private Function GetSketchSegmentConstructionState(ByVal swSeg As SketchSegment) As String
+    Dim isConstr As Boolean
+    On Error Resume Next
+    GetSketchSegmentConstructionState = "unknown"
+    If swSeg Is Nothing Then
+        GetSketchSegmentConstructionState = "Nothing"
+        Exit Function
+    End If
+    isConstr = swSeg.ConstructionGeometry
+    If Err.Number <> 0 Then
+        GetSketchSegmentConstructionState = "read error " & Err.Number & ": " & Err.Description
+        Err.Clear
+    Else
+        GetSketchSegmentConstructionState = IIf(isConstr, "construction", "solid")
+    End If
+    On Error GoTo 0
+End Function
+
+Private Sub DebugSketchSegment(ByVal label As String, ByVal swSeg As SketchSegment, _
+    Optional ByVal rotRad As Double = 999#, Optional ByVal mirrorY As Boolean = False, _
+    Optional ByVal tStart As Double = -1#, Optional ByVal tEnd As Double = -1#)
+    Dim x1 As Double
+    Dim y1 As Double
+    Dim x2 As Double
+    Dim y2 As Double
+    Dim xc1 As Double
+    Dim yc1 As Double
+    Dim xc2 As Double
+    Dim yc2 As Double
+
+    If swSeg Is Nothing Then
+        DebugPrint "  " & label & ": segment=Nothing"
+        Exit Sub
+    End If
+
+    ReadSplineEndpointCoordsM swSeg, False, x1, y1
+    ReadSplineEndpointCoordsM swSeg, True, x2, y2
+    DebugPrint "  " & label & ": " & GetSketchSegmentConstructionState(swSeg) & _
+        " api start=" & FormatPointMM(x1, y1) & " api end=" & FormatPointMM(x2, y2)
+
+    If tStart >= 0# Then
+        GetInvoluteFlankEndpointM tStart, rotRad, mirrorY, xc1, yc1
+        GetInvoluteFlankEndpointM tEnd, rotRad, mirrorY, xc2, yc2
+        DebugPrint "  " & label & ": computed start=" & FormatPointMM(xc1, yc1) & _
+            " computed end=" & FormatPointMM(xc2, yc2)
+    End If
+End Sub
+
+Private Sub SetSketchSegmentConstruction(ByVal swSeg As SketchSegment, ByVal isConstruction As Boolean, ByVal label As String)
+    Dim beforeState As String
+    Dim afterState As String
+
+    On Error Resume Next
+    If swSeg Is Nothing Then
+        DebugPrint "SetSketchSegmentConstruction(" & label & "): segment=Nothing — skip"
+        Exit Sub
+    End If
+
+    beforeState = GetSketchSegmentConstructionState(swSeg)
+    DebugPrint "SetSketchSegmentConstruction(" & label & "): before=" & beforeState & _
+        " request=" & IIf(isConstruction, "construction", "solid")
+
+    swSeg.ConstructionGeometry = isConstruction
+    If Err.Number <> 0 Then
+        DebugPrint "SetSketchSegmentConstruction(" & label & ") FAIL: " & Err.Number & " " & Err.Description
+        Err.Clear
+        On Error GoTo 0
+        Exit Sub
+    End If
+
+    afterState = GetSketchSegmentConstructionState(swSeg)
+    DebugPrint "SetSketchSegmentConstruction(" & label & "): after=" & afterState
+    On Error GoTo 0
+End Sub
+
+Private Sub EnsureGapRadialConstructionLines()
+    If Not mGapRootConstrA Is Nothing Then SetSketchSegmentConstruction mGapRootConstrA, True, "A radial reapply"
+    If Not mGapRootConstrB Is Nothing Then SetSketchSegmentConstruction mGapRootConstrB, True, "B radial reapply"
+End Sub
+
+Private Function CreateGapRootLineGeometryForFlank(ByVal flankLabel As String, _
+    ByVal rotRad As Double, ByVal mirrorY As Boolean, _
+    ByVal xRoot As Double, ByVal yRoot As Double, _
+    ByRef swConstr As SketchSegment, ByRef swUndercut As SketchSegment) As Boolean
+    Dim cx As Double
+    Dim cy As Double
+    Dim xEq0 As Double
+    Dim yEq0 As Double
+
+    DebugPrint "CreateGapRootLineGeometryForFlank[" & flankLabel & "]: enter root=" & FormatPointMM(xRoot, yRoot)
+
+    CreateGapRootLineGeometryForFlank = False
+    Set swConstr = Nothing
+    Set swUndercut = Nothing
+
+    GetGearAxisCenterOnSketchM cx, cy
+    GetInvoluteFlankEndpointM GearGeom.InvoluteTStart, rotRad, mirrorY, xEq0, yEq0
+    DebugPrint "CreateGapRootLineGeometryForFlank[" & flankLabel & "]: axis centre=" & FormatPointMM(cx, cy) & _
+        " eq start (computed)=" & FormatPointMM(xEq0, yEq0)
+
+    swSketchManager.AddToDB = True
+
+    ' Construction: centre to dedendum (start of profile undercut)
+    Set swConstr = swSketchManager.CreateCenterLine(cx, cy, 0, xRoot, yRoot, 0)
+    If swConstr Is Nothing Then
+        DebugPrint "CreateGapRootLineGeometryForFlank[" & flankLabel & "]: CreateCenterLine failed — try CreateLine"
+        Set swConstr = swSketchManager.CreateLine(cx, cy, 0, xRoot, yRoot, 0)
+        If swConstr Is Nothing Then
+            DebugPrint "CreateGapRootLineGeometryForFlank[" & flankLabel & "]: FAIL radial line"
+            Exit Function
+        End If
+        SetSketchSegmentConstruction swConstr, True, flankLabel & " radial"
+    Else
+        DebugPrint "CreateGapRootLineGeometryForFlank[" & flankLabel & "]: CreateCenterLine OK state=" & _
+            GetSketchSegmentConstructionState(swConstr)
+    End If
+
+    ' Profile: dedendum to involute start (computed — eq spline API endpoints are always 0,0)
+    Set swUndercut = swSketchManager.CreateLine(xRoot, yRoot, 0, xEq0, yEq0, 0)
+    If swUndercut Is Nothing Then
+        DebugPrint "CreateGapRootLineGeometryForFlank[" & flankLabel & "]: FAIL undercut line"
+        Exit Function
+    End If
+    DebugSketchSegment "radial", swConstr
+    DebugSketchSegment "undercut", swUndercut
+
+    CreateGapRootLineGeometryForFlank = True
+    DebugPrint "CreateGapRootLineGeometryForFlank[" & flankLabel & "]: OK"
+End Function
+
+Private Function CreateGapRootConnectors(ByVal rotFlankA As Double, ByVal rotFlankB As Double, _
+    ByVal xRootA As Double, ByVal yRootA As Double, _
+    ByVal xRootB As Double, ByVal yRootB As Double) As Boolean
+    DebugPrint "CreateGapRootConnectors: enter A root=" & FormatPointMM(xRootA, yRootA) & _
+        " B root=" & FormatPointMM(xRootB, yRootB)
+
+    CreateGapRootConnectors = False
+    If Not CreateGapRootLineGeometryForFlank("A", rotFlankA, True, xRootA, yRootA, _
+        mGapRootConstrA, mGapRootUndercutA) Then Exit Function
+    If Not CreateGapRootLineGeometryForFlank("B", rotFlankB, False, xRootB, yRootB, _
+        mGapRootConstrB, mGapRootUndercutB) Then Exit Function
+    DebugPrint "CreateGapRootConnectors OK"
+    CreateGapRootConnectors = True
+End Function
+
+Private Function CreateGapConstructionCircleAtAxis(ByVal radiusM As Double, ByVal dimName As String, _
+    ByVal diameterMM As Double) As SldWorks.SketchSegment
+    Dim cx As Double
+    Dim cy As Double
+
+    Set CreateGapConstructionCircleAtAxis = Nothing
+    On Error Resume Next
+    GetGearAxisCenterOnSketchM cx, cy
+    Set CreateGapConstructionCircleAtAxis = swSketchManager.CreateCircle(cx, cy, 0, cx + radiusM, cy, 0)
+    If CreateGapConstructionCircleAtAxis Is Nothing Then Exit Function
+    CreateGapConstructionCircleAtAxis.ConstructionGeometry = True
+    AddDiameterDimensionToCircle CreateGapConstructionCircleAtAxis, dimName, diameterMM
+    ConstrainGearCircleCenterToAxis CreateGapConstructionCircleAtAxis
+    On Error GoTo 0
+End Function
+
+Private Sub ConstrainGapSketchClosed()
+    On Error Resume Next
+    swSketchManager.AddToDB = False
+    swSketchManager.AutoSolve = True
+    If mGapUseRootConnector And Not mGapRootUndercutA Is Nothing And Not mGapRootUndercutB Is Nothing Then
+        CoincidentSketchEnds mGapRootUndercutA, False, swRootArc, False
+        CoincidentSketchEnds mGapRootUndercutB, False, swRootArc, True
+        ' Undercut ends at eq-curve start — already coincident by construction; do not re-constrain eq curve
+    Else
+        CoincidentSketchEnds swInvoluteSpline, False, swRootArc, False
+        CoincidentSketchEnds swMirroredInvoluteSpline, False, swRootArc, True
+    End If
+    CoincidentSketchEnds swInvoluteSpline, True, swTipLandArc, False
+    CoincidentSketchEnds swMirroredInvoluteSpline, True, swTipLandArc, True
+    EnsureGapRadialConstructionLines
+    swSketchManager.AddToDB = True
+    On Error GoTo 0
+End Sub
+
+Private Sub ConstrainGapFlankTangents()
+    ' Equation-driven curves over-define when given tangent constraints — skip eq flanks.
+    On Error Resume Next
+    If Not mGapUseRootConnector Then
+        ConstrainTangentSketchSegments swInvoluteSpline, swRootArc
+        ConstrainTangentSketchSegments swMirroredInvoluteSpline, swRootArc
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Function AddGapTipRootArcs(ByVal ra As Double, ByVal rr As Double, _
+    ByVal xRootA As Double, ByVal yRootA As Double, ByVal xRootB As Double, ByVal yRootB As Double, _
+    ByVal xTipA As Double, ByVal yTipA As Double, ByVal xTipB As Double, ByVal yTipB As Double) As Boolean
+
+    AddGapTipRootArcs = False
+    Set swRootArc = CreateCircleArcBetween(rr, xRootA, yRootA, xRootB, yRootB)
+    If swRootArc Is Nothing Then Exit Function
+    Set swTipLandArc = CreateCircleArcBetween(ra, xTipA, yTipA, xTipB, yTipB)
+    If swTipLandArc Is Nothing Then Exit Function
+    AddGapTipRootArcs = True
+End Function
+
+' ---------------------------------------------------------------------------
+' Public entry — called from Involute1.GenerateGear
+' ---------------------------------------------------------------------------
+Public Function CreateToothGapSketch() As Boolean
+    On Error GoTo SketchFail
+
+    Dim ra As Double
+    Dim rr As Double
+    Dim pitch As Double
+    Dim xTipA As Double
+    Dim yTipA As Double
+    Dim xTipB As Double
+    Dim yTipB As Double
+    Dim xRootA As Double
+    Dim yRootA As Double
+    Dim xRootB As Double
+    Dim yRootB As Double
+    Dim sketchStep As String
+    Dim rotFlankA As Double
+    Dim rotFlankB As Double
+
+    sketchStep = "init"
+    DebugPrint "CreateToothGapSketch: --- begin ---"
+    GetInvoluteGapFlankRotRad rotFlankA, rotFlankB
+    DebugPrint "CreateToothGapSketch: rotFlankA=" & Format(rotFlankA * 180# / Pi, "0.####") & _
+        " deg rotFlankB=" & Format(rotFlankB * 180# / Pi, "0.####") & " deg"
+
+    ra = GearGeom.AddendumRadiusM
+    rr = GearGeom.DedendumRadiusM
+    pitch = GearGeom.AngularPitchRad
+    DebugPrint "CreateToothGapSketch: ra=" & FormatCoordMM(ra) & " mm rr=" & FormatCoordMM(rr) & _
+        " mm t=[" & Format(GearGeom.InvoluteTStart, "0.####") & "," & Format(GearGeom.InvoluteTEnd, "0.####") & "]"
+
+    sketchStep = "begin sketch"
+    DebugPrint "CreateToothGapSketch: step=" & sketchStep
+    SyncSketchOffsetFromAddendumBossCenter
+    DebugPrint "CreateToothGapSketch: sketch offset=" & FormatPointMM(GetSketchOffsetXM(), GetSketchOffsetYM())
+    If Not BeginSketchOnFrontPlane() Then
+        DebugPrint "CreateToothGapSketch: BeginSketchOnFrontPlane failed"
+        GoTo SketchFail
+    End If
+    Set sw2DSketch = swSketchManager.ActiveSketch
+    DebugPrint "CreateToothGapSketch: active sketch=" & IIf(sw2DSketch Is Nothing, "Nothing", "OK")
+    EnsureAxisAnchorPointInActiveSketch
+
+    sketchStep = "construction circles"
+    DebugPrint "CreateToothGapSketch: step=" & sketchStep
+    Set mGapDaConstrCircle = CreateGapConstructionCircleAtAxis(ra, GEAR_DIM_ADDENDUM_DIAMETER, GearGeom.AddendumDiameterMM)
+    Set mGapDdConstrCircle = CreateGapConstructionCircleAtAxis(rr, GEAR_DIM_DEDENDUM_DIAMETER, GearGeom.DedendumDiameterMM)
+    If mGapDaConstrCircle Is Nothing Or mGapDdConstrCircle Is Nothing Then GoTo SketchFail
+    DebugPrint "CreateToothGapSketch: Da/Dd construction circles OK"
+    ConstrainSketchSegmentsConcentric mGapDaConstrCircle, mGapDdConstrCircle
+
+    sketchStep = "gap flank A"
+    DebugPrint "CreateToothGapSketch: step=" & sketchStep
+    Set swInvoluteSpline = CreateInvoluteFlankEquationSpline(rotFlankA, True)
+    If swInvoluteSpline Is Nothing Then GoTo SketchFail
+    DebugSketchSegment "eq flank A", swInvoluteSpline, rotFlankA, True, GearGeom.InvoluteTStart, GearGeom.InvoluteTEnd
+
+    sketchStep = "gap flank B"
+    DebugPrint "CreateToothGapSketch: step=" & sketchStep
+    Set swMirroredInvoluteSpline = CreateInvoluteFlankEquationSpline(rotFlankB, False)
+    If swMirroredInvoluteSpline Is Nothing Then GoTo SketchFail
+    DebugSketchSegment "eq flank B", swMirroredInvoluteSpline, rotFlankB, False, GearGeom.InvoluteTStart, GearGeom.InvoluteTEnd
+
+    mGapUseRootConnector = InvoluteGapNeedsRootConnector()
+    DebugPrint "CreateToothGapSketch: mGapUseRootConnector=" & mGapUseRootConnector & _
+        " (Dd=" & Format(GearGeom.DedendumDiameterMM, "0.####") & " Db=" & Format(GearGeom.BaseDiameterMM, "0.####") & " mm)"
+    PrepareGapRootCoords rotFlankA, True, rr, xRootA, yRootA
+    PrepareGapRootCoords rotFlankB, False, rr, xRootB, yRootB
+    DebugPrint "CreateToothGapSketch: root A=" & FormatPointMM(xRootA, yRootA) & _
+        " root B=" & FormatPointMM(xRootB, yRootB)
+
+    If mGapUseRootConnector Then
+        sketchStep = "gap root connectors"
+        DebugPrint "CreateToothGapSketch: step=" & sketchStep
+        If Not CreateGapRootConnectors(rotFlankA, rotFlankB, xRootA, yRootA, xRootB, yRootB) Then GoTo SketchFail
+        DebugSketchSegment "stored radial A", mGapRootConstrA
+        DebugSketchSegment "stored undercut A", mGapRootUndercutA
+        DebugSketchSegment "stored radial B", mGapRootConstrB
+        DebugSketchSegment "stored undercut B", mGapRootUndercutB
+    Else
+        DebugPrint "CreateToothGapSketch: skip root connectors (dedendum >= base)"
+    End If
+
+    PrepareGapTipCoords rotFlankA, True, ra, xTipA, yTipA
+    PrepareGapTipCoords rotFlankB, False, ra, xTipB, yTipB
+    DebugPrint "CreateToothGapSketch: tip A (computed)=" & FormatPointMM(xTipA, yTipA) & _
+        " tip B (computed)=" & FormatPointMM(xTipB, yTipB)
+
+    sketchStep = "gap tip and root arcs"
+    DebugPrint "CreateToothGapSketch: step=" & sketchStep
+    If Not AddGapTipRootArcs(ra, rr, xRootA, yRootA, xRootB, yRootB, xTipA, yTipA, xTipB, yTipB) Then GoTo SketchFail
+    DebugPrint "CreateToothGapSketch: tip/root arcs created"
+    DebugSketchSegment "root arc", swRootArc
+    DebugSketchSegment "tip arc", swTipLandArc
+
+    sketchStep = "arcs coradial with Da/Dd"
+    DebugPrint "CreateToothGapSketch: step=" & sketchStep
+    ConstrainSketchSegmentsCoradial swTipLandArc, mGapDaConstrCircle
+    ConstrainSketchSegmentsCoradial swRootArc, mGapDdConstrCircle
+    ConstrainArcOrCircleCenterToAxis swTipLandArc
+    ConstrainArcOrCircleCenterToAxis swRootArc
+    DebugPrint "CreateToothGapSketch: coradial/center constraints applied"
+
+    sketchStep = "coincident corners"
+    DebugPrint "CreateToothGapSketch: step=" & sketchStep
+    ConstrainGapSketchClosed
+    DebugPrint "CreateToothGapSketch: coincident corners applied"
+
+    sketchStep = "spline tangent at arcs"
+    DebugPrint "CreateToothGapSketch: step=" & sketchStep
+    ConstrainGapFlankTangents
+    DebugPrint "CreateToothGapSketch: tangent pass done"
+
+    If mGapUseRootConnector Then
+        DebugPrint "CreateToothGapSketch: post-constraint radial A=" & GetSketchSegmentConstructionState(mGapRootConstrA)
+        DebugPrint "CreateToothGapSketch: post-constraint radial B=" & GetSketchSegmentConstructionState(mGapRootConstrB)
+    End If
+
+    sketchStep = "capture sketch"
+    DebugPrint "CreateToothGapSketch: step=" & sketchStep
+    Set swToothGapSketchFeat = FindLastSketchFeature()
+    If swToothGapSketchFeat Is Nothing Then
+        DebugPrint "CreateToothGapSketch: could not get sketch feature"
+        GoTo SketchFail
+    End If
+    mGapSketchFeatName = swToothGapSketchFeat.Name
+
+    sketchStep = "exit sketch"
+    swSketchManager.InsertSketch True
+    ClearSWSelection
+    RebuildSWPart
+
+    DebugPrint "CreateToothGapSketch OK (gap pitch=" & Format(pitch * 180# / Pi, "0.###") & " deg)"
+    CreateToothGapSketch = True
+    Exit Function
+
+SketchFail:
+    DebugPrint "CreateToothGapSketch FAIL (" & sketchStep & "): " & Err.Number & " " & Err.Description
+    CreateToothGapSketch = False
+End Function
