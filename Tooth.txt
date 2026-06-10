@@ -620,6 +620,20 @@ Private Sub GetSketchLineAngleFromCenterRad(ByVal swLine As SldWorks.SketchSegme
     End If
 End Sub
 
+Private Sub ConstrainSketchSegmentHorizontal(ByVal swSeg As SldWorks.SketchSegment, ByVal label As String)
+    On Error Resume Next
+    If swSeg Is Nothing Then Exit Sub
+    ClearSWSelection
+    swSeg.Select4 False, Nothing
+    swDoc.SketchAddConstraints "sgHORIZONTAL"
+    If Err.Number <> 0 Then
+        DebugPrint "ConstrainSketchSegmentHorizontal(" & label & ") FAIL: " & Err.Number & " " & Err.Description
+        Err.Clear
+    End If
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
 Private Function CreateGapHorizPlusXReferenceLine(ByVal cx As Double, ByVal cy As Double, ByVal spanM As Double) As SldWorks.SketchSegment
     ' One-sided +X ray (not a full centerline) so the angle to flank A is CCW from horizontal
     Set CreateGapHorizPlusXReferenceLine = Nothing
@@ -627,6 +641,7 @@ Private Function CreateGapHorizPlusXReferenceLine(ByVal cx As Double, ByVal cy A
     Set CreateGapHorizPlusXReferenceLine = swSketchManager.CreateLine(cx, cy, 0, cx + spanM, cy, 0)
     If Not CreateGapHorizPlusXReferenceLine Is Nothing Then
         SetSketchSegmentConstruction CreateGapHorizPlusXReferenceLine, True, "horizontal +X ref"
+        ConstrainSketchSegmentHorizontal CreateGapHorizPlusXReferenceLine, "horizontal +X ref"
     End If
 End Function
 
