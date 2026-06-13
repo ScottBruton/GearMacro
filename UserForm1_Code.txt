@@ -28,14 +28,18 @@
 '   optExternalGear   OptionButton  Caption "External"   GroupName = "GearType"
 '   optInternalGear    OptionButton  Caption "Internal (ring)"   GroupName = "GearType"
 '
-' Existing controls: tbPressureAngle, tbModule, tbTeeth, tbWidth, cbGenerate, etc.
+'   tbHubDia         TextBox       Optional hub OD (mm); blank = 40% of pitch diameter
+'   tbShaftDia       TextBox       Optional bore/shaft dia (mm); blank = 10 mm
+'
 
 Private Sub UserForm_Initialize()
     On Error Resume Next
     tbPressureAngle.Text = "20"
     tbModule.Text = "1.25"
-    tbTeeth.Text = "9"
+    tbTeeth.Text = "100"
     tbWidth.Text = "10"
+    If ControlExists("tbHubDia") Then tbHubDia.Text = ""
+    If ControlExists("tbShaftDia") Then tbShaftDia.Text = ""
 
     If ControlExists("optDrivingGear") Then optDrivingGear.Value = True
     If ControlExists("optExternalGear") Then optExternalGear.Value = True
@@ -314,7 +318,7 @@ Private Sub InitMfgControlTooltips()
     SetControlTip "TextBox3", tipAdj, "fraManufacturing"
 End Sub
 
-' Called from Module1 when generating a driven gear
+' Called from GearTrain when generating a driven gear
 Public Function MfgClearanceMM() As Double
     On Error Resume Next
     MfgClearanceMM = 0#

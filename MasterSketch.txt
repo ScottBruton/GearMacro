@@ -1,0 +1,65 @@
+Option Explicit
+
+' FEATURE: Master layout sketch (Sketch1) — OD, Pitch, Root, Hub, Shaft construction circles.
+' Paste into VBA module: MasterSketch
+'
+' Depends on Involute1: GearGeom, swLayoutSketchFeat, swSketchManager, sw2DSketch
+' Depends on GearLib: GEAR_DIM_LAYOUT_*, sketch helpers, DebugPrint
+
+Public Function CreateMasterLayoutSketch() As Boolean
+    On Error GoTo LayoutFail
+
+    Dim swCircles(1 To 5) As SldWorks.SketchSegment
+    Dim labels(1 To 5) As String
+    Dim diams(1 To 5) As Double
+    Dim i As Long
+    Dim cx As Double
+    Dim cy As Double
+
+    CreateMasterLayoutSketch = False
+    DebugPrint "CreateMasterLayoutSketch: --- begin ---"
+    cx = gSketchOffsetXM
+    cy = gSketchOffsetYM
+
+    If Not BeginSketchOnFrontPlane() Then GoTo LayoutFail
+    Set sw2DSketch = swSketchManager.ActiveSketch
+    Set swLayoutSketchFeat = Nothing
+
+    labels(1) = GEAR_DIM_LAYOUT_OD: diams(1) = GearGeom.AddendumDiameterMM
+    labels(2) = GEAR_DIM_LAYOUT_PITCH: diams(2) = GearGeom.PitchDiameterMM
+    labels(3) = GEAR_DIM_LAYOUT_ROOT: diams(3) = GearGeom.DedendumDiameterMM
+    labels(4) = GEAR_DIM_LAYOUT_HUB: diams(4) = GearGeom.HubDiameterMM
+    labels(5) = GEAR_DIM_LAYOUT_SHAFT: diams(5) = GearGeom.ShaftDiameterMM
+
+    For i = 1 To 5
+        Set swCircles(i) = swSketchManager.CreateCircle(cx, cy, 0, cx + diams(i) / MM_PER_M / 2#, cy, 0)
+        If swCircles(i) Is Nothing Then GoTo LayoutFail
+        swCircles(i).ConstructionGeometry = True
+        AddDiameterDimensionToCircle swCircles(i), labels(i), diams(i)
+    Next i
+
+    ConstrainSketchSegmentsConcentric swCircles(1), swCircles(2)
+    ConstrainSketchSegmentsConcentric swCircles(1), swCircles(3)
+    ConstrainSketchSegmentsConcentric swCircles(1), swCircles(4)
+    ConstrainSketchSegmentsConcentric swCircles(1), swCircles(5)
+
+    swSketchManager.InsertSketch True
+    Set swLayoutSketchFeat = FindLastSketchFeature()
+    If Not swLayoutSketchFeat Is Nothing Then gLayoutSketchFeatName = swLayoutSketchFeat.Name
+
+    ClearSWSelection
+    RebuildSWPart
+    DebugPrint "CreateMasterLayoutSketch OK feat=" & gLayoutSketchFeatName
+    CreateMasterLayoutSketch = True
+    Exit Function
+
+LayoutFail:
+    NoteGearBuildError FormatVBError("CreateMasterLayoutSketch")
+    If gLastGearBuildError = "" Then NoteGearBuildError "CreateMasterLayoutSketch failed (plane/sketch/circles)"
+    DebugPrint "CreateMasterLayoutSketch FAIL: " & gLastGearBuildError
+    CreateMasterLayoutSketch = False
+End Function
+
+Public Function GetLayoutSketchFeatName() As String
+    GetLayoutSketchFeatName = gLayoutSketchFeatName
+End Function

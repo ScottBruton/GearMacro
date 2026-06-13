@@ -1,0 +1,134 @@
+Option Explicit
+
+' FEATURE: Gear body — revolve blank (hub + rim + bore) and McMaster OD fillet.
+' Paste into VBA module: GearBody
+'
+' Depends on Involute1: GearGeom, swFeatMgr, swRevolveFeat, swRevolveAxisSketchFeat, swFilletFeat
+' Depends on GearLib: constants, sketch helpers, DebugPrint
+
+' ---------------------------------------------------------------------------
+' Revolve blank
+' ---------------------------------------------------------------------------
+Public Function CreateRevolveBlank() As Boolean
+    On Error GoTo BlankFail
+
+    Dim hubW As Double
+    Dim rimW As Double
+    Dim shaftR As Double
+    Dim hubR As Double
+    Dim odR As Double
+    Dim swAxis As SketchSegment
+    Dim swBore As SketchSegment
+    Dim span As Double
+    Dim zBase As Double
+
+    CreateRevolveBlank = False
+    DebugPrint "CreateRevolveBlank: begin hubW=" & Format(GearGeom.HubWidthMM, "0.###") & " rimW=" & Format(GearGeom.RimWidthMM, "0.###") & " mm"
+    hubW = GearGeom.HubWidthM
+    rimW = GearGeom.RimWidthM
+    shaftR = GearGeom.ShaftRadiusM
+    hubR = GearGeom.HubRadiusM
+    odR = GearGeom.AddendumRadiusM
+    span = hubW + rimW + shaftR
+    zBase = gBossStartOffsetZM
+
+    ExitActiveSketchIfAny
+    If Not BeginSketchOnRightPlane() Then GoTo BlankFail
+    DebugPrint "CreateRevolveBlank: profile sketch on Right plane"
+
+    swSketchManager.CreateLine 0, zBase - hubW, 0, hubR, zBase - hubW, 0
+    swSketchManager.CreateLine hubR, zBase - hubW, 0, hubR, zBase, 0
+    swSketchManager.CreateLine hubR, zBase, 0, odR, zBase, 0
+    swSketchManager.CreateLine odR, zBase, 0, odR, zBase + rimW, 0
+    swSketchManager.CreateLine odR, zBase + rimW, 0, 0, zBase + rimW, 0
+    swSketchManager.CreateLine 0, zBase + rimW, 0, 0, zBase - hubW, 0
+
+    Set swBore = swSketchManager.CreateCircle(0, zBase, 0, shaftR, zBase, 0)
+    If swBore Is Nothing Then GoTo BlankFail
+
+    Set swAxis = swSketchManager.CreateCenterLine(0, zBase - span, 0, 0, zBase + span, 0)
+    If swAxis Is Nothing Then GoTo BlankFail
+
+    swSketchManager.InsertSketch True
+    Set swRevolveAxisSketchFeat = FindLastSketchFeature()
+    If Not swRevolveAxisSketchFeat Is Nothing Then gRevolveSketchFeatName = swRevolveAxisSketchFeat.Name
+
+    ClearSWSelection
+    swAxis.Select4 False, Nothing
+    swRevolveAxisSketchFeat.Select2 True, 0
+
+    DebugPrint "CreateRevolveBlank: FeatureRevolve..."
+    On Error Resume Next
+    Err.Clear
+    Set swRevolveFeat = swFeatMgr.FeatureRevolve2(True, True, False, False, False, 0, 2# * Pi, 0#, False, False, 0, 0#, 0, 0#, 0, True, False)
+    If swRevolveFeat Is Nothing Then
+        Set swRevolveFeat = swFeatMgr.FeatureRevolve(True, True, False, False, False, False, 0, 0, 2# * Pi, 0, 0, False, 0, 0, False, False, False, True, True, True)
+    End If
+    On Error GoTo BlankFail
+
+    If swRevolveFeat Is Nothing Then
+        DebugPrint "CreateRevolveBlank: FeatureRevolve failed"
+        GoTo BlankFail
+    End If
+
+    Set swAddendumExtrudeFeat = swRevolveFeat
+    gBlankSketchFeatName = gRevolveSketchFeatName
+    ClearSWSelection
+    RebuildSWPart
+
+    DebugPrint "CreateRevolveBlank OK feat=" & swRevolveFeat.Name & _
+        " hubW=" & Format(GearGeom.HubWidthMM, "0.###") & " rimW=" & Format(GearGeom.RimWidthMM, "0.###") & " mm"
+    CreateRevolveBlank = True
+    Exit Function
+
+BlankFail:
+    NoteGearBuildError FormatVBError("CreateRevolveBlank")
+    If gLastGearBuildError = "" Then NoteGearBuildError "CreateRevolveBlank failed (FeatureRevolve returned Nothing)"
+    DebugPrint "CreateRevolveBlank FAIL: " & gLastGearBuildError
+    CreateRevolveBlank = False
+End Function
+
+' ---------------------------------------------------------------------------
+' OD fillet (R = OD x 0.01) — non-fatal if edges cannot be selected
+' ---------------------------------------------------------------------------
+Public Function CreateMcMasterFillet() As Boolean
+    On Error GoTo FilletFail
+
+    Dim filletR As Double
+    Dim swFeatData As Object
+
+    CreateMcMasterFillet = False
+    DebugPrint "CreateMcMasterFillet: begin R=" & Format(GearGeom.AddendumDiameterMM * GEAR_MCM_FILLET_OD_RATIO, "0.####") & " mm"
+    filletR = GearGeom.AddendumDiameterMM * GEAR_MCM_FILLET_OD_RATIO / MM_PER_M
+
+    ClearSWSelection
+    swModelDocExt.SelectByID2 "", "EDGE", 0, 0, 0, False, 0, Nothing, 0
+
+    On Error Resume Next
+    Set swFeatData = swFeatMgr.CreateDefinition(swFeatureNameID_e.swFmFillet)
+    If swFeatData Is Nothing Then
+        DebugPrint "CreateMcMasterFillet WARN: fillet skipped (no edges pre-selected)"
+        CreateMcMasterFillet = True
+        Exit Function
+    End If
+    swFeatData.Radius = filletR
+    swFeatData.DefaultRadius = filletR
+    swFeatData.Type = swFilletType_e.swConstRadiusFillet
+    Set swFilletFeat = swFeatMgr.CreateFeature(swFeatData)
+    On Error GoTo FilletFail
+
+    If swFilletFeat Is Nothing Then
+        DebugPrint "CreateMcMasterFillet WARN: fillet feature not created (non-fatal)"
+        CreateMcMasterFillet = True
+        Exit Function
+    End If
+
+    RebuildSWPart
+    DebugPrint "CreateMcMasterFillet OK R=" & Format(filletR * MM_PER_M, "0.####") & " mm feat=" & swFilletFeat.Name
+    CreateMcMasterFillet = True
+    Exit Function
+
+FilletFail:
+    DebugPrint "CreateMcMasterFillet WARN: " & Err.Description & " (non-fatal)"
+    CreateMcMasterFillet = True
+End Function
