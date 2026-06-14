@@ -1,14 +1,313 @@
 Option Explicit
 
-' FEATURE: Gear body — revolve blank (hub + rim + bore) and McMaster OD fillet.
-' Paste into VBA module: GearBody
+' =============================================================================
+' FEATURE: Gear body blank  (McMaster revolve workflow)
+' =============================================================================
+' GenerateGear order for this module:
+'   1. CreateRevolveAxisLayoutSketch  ->  GearN_AxisLayout  (Right Plane)
+'        - Converts GearN_Axis into sketch; hub/rim centre lines colinear to axis
+'        - Dims: InvoluteGear_RimWidth, InvoluteGear_TotalAxial
+'   2. CreateRevolveProfileSketch     ->  GearN_Body       (Right Plane)
+'        - L-section profile; bore inner edge offset from GearN_Axis by shaft radius
+'   3. SelectRevolveProfileAndRefAxis + FeatureRevolve2  ->  Revolve1 (solid blank)
+'   4. CreateMcMasterFillet           ->  Fillet1 (OD fillet, non-fatal if skipped)
 '
-' Depends on Involute1: GearGeom, swFeatMgr, swRevolveFeat, swRevolveAxisSketchFeat, swFilletFeat
-' Depends on GearLib: constants, sketch helpers, DebugPrint
+' Prerequisite (Involute1 / GearLib): GearN_Layout, GearN_Center, GearN_Axis already exist
+' =============================================================================
 
-' ---------------------------------------------------------------------------
-' Revolve blank
-' ---------------------------------------------------------------------------
+Private mSketchAxisLine As SldWorks.SketchSegment
+
+Private Sub ResetSketchAxisLineRef()
+    Set mSketchAxisLine = Nothing
+End Sub
+
+' Opens Right Plane sketch and converts GearN_Axis to a construction line in the sketch.
+Private Function BeginRightPlaneSketchWithRefAxis() As Boolean
+    BeginRightPlaneSketchWithRefAxis = False
+    ResetSketchAxisLineRef
+    ExitActiveSketchIfAny
+    If Not BeginSketchOnRightPlane() Then Exit Function
+    If gAxisName = "" And swGearAxisFeat Is Nothing Then
+        DebugPrint "BeginRightPlaneSketchWithRefAxis WARN: ref axis not created yet"
+    End If
+    Set mSketchAxisLine = ConvertRefAxisIntoActiveSketch()
+    BeginRightPlaneSketchWithRefAxis = True
+End Function
+
+Private Function GetSketchAxisRadialY() As Double
+    Dim x1 As Double, y1 As Double, z1 As Double
+
+    GetSketchAxisRadialY = 0#
+    On Error Resume Next
+    If Not mSketchAxisLine Is Nothing Then
+        mSketchAxisLine.GetStartPoint2 x1, y1, z1
+        GetSketchAxisRadialY = y1
+    End If
+    On Error GoTo 0
+End Function
+
+Private Sub LogRevolveSelectionDetails()
+    Dim i As Long
+    Dim selCount As Long
+    Dim selType As Long
+    Dim selMark As Long
+
+    On Error Resume Next
+    selCount = swSelMgr.GetSelectedObjectCount2(-1)
+    DebugPrint "LogRevolveSelectionDetails: selCount=" & selCount
+    For i = 1 To selCount
+        selType = swSelMgr.GetSelectedObjectType3(i, -1)
+        selMark = swSelMgr.GetSelectedObjectMark(i)
+        DebugPrint "  sel(" & i & ") type=" & selType & " mark=" & selMark
+    Next i
+    On Error GoTo 0
+End Sub
+
+Private Function SelectRevolveProfileSketch(ByVal swProfileSketchFeat As SldWorks.Feature) As Boolean
+    Dim profileName As String
+    Dim docTitle As String
+    Dim sd As SldWorks.SelectData
+
+    SelectRevolveProfileSketch = False
+    If swProfileSketchFeat Is Nothing Then Exit Function
+    profileName = swProfileSketchFeat.Name
+    docTitle = swDoc.GetTitle
+
+    ClearSWSelection
+    On Error Resume Next
+
+    Set sd = swSelMgr.CreateSelectData
+    If Not sd Is Nothing Then
+        sd.Mark = 0
+        If swProfileSketchFeat.Select4(False, sd) Then
+            SelectRevolveProfileSketch = True
+            Exit Function
+        End If
+    End If
+
+    SelectRevolveProfileSketch = swModelDocExt.SelectByID2(profileName, "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+    If Not SelectRevolveProfileSketch And docTitle <> "" Then
+        SelectRevolveProfileSketch = swModelDocExt.SelectByID2(profileName & "@" & docTitle, "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function SelectRevolveRefAxis(ByVal axisMark As Long) As Boolean
+    Dim axisName As String
+    Dim docTitle As String
+    Dim sd As SldWorks.SelectData
+
+    SelectRevolveRefAxis = False
+    axisName = gAxisName
+    If axisName = "" Then axisName = BuildGearRefAxisName()
+    docTitle = swDoc.GetTitle
+
+    On Error Resume Next
+    SelectRevolveRefAxis = swModelDocExt.SelectByID2(axisName, "REFAXIS", 0, 0, 0, True, axisMark, Nothing, 0)
+    If Not SelectRevolveRefAxis Then SelectRevolveRefAxis = swModelDocExt.SelectByID2(axisName, "AXIS", 0, 0, 0, True, axisMark, Nothing, 0)
+    If Not SelectRevolveRefAxis And docTitle <> "" Then
+        SelectRevolveRefAxis = swModelDocExt.SelectByID2(axisName & "@" & docTitle, "REFAXIS", 0, 0, 0, True, axisMark, Nothing, 0)
+        If Not SelectRevolveRefAxis Then SelectRevolveRefAxis = swModelDocExt.SelectByID2(axisName & "@" & docTitle, "AXIS", 0, 0, 0, True, axisMark, Nothing, 0)
+    End If
+    If Not SelectRevolveRefAxis And Not swGearAxisFeat Is Nothing Then
+        Set sd = swSelMgr.CreateSelectData
+        If Not sd Is Nothing Then
+            sd.Mark = axisMark
+            SelectRevolveRefAxis = swGearAxisFeat.Select4(True, sd)
+        End If
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function SelectRevolveProfileAndRefAxis(ByVal swProfileSketchFeat As SldWorks.Feature) As Boolean
+    Dim profileName As String
+    Dim profileOk As Boolean
+    Dim axisOk As Boolean
+    Dim selCount As Long
+
+    SelectRevolveProfileAndRefAxis = False
+    If swProfileSketchFeat Is Nothing Then Exit Function
+    profileName = swProfileSketchFeat.Name
+
+    ClearSWSelection
+    swDoc.ShowNamedView2 "*Trimetric", 8
+    swDoc.ViewZoomtofit2
+    swDoc.GraphicsRedraw2
+
+    profileOk = SelectRevolveProfileSketch(swProfileSketchFeat)
+    If profileOk Then axisOk = SelectRevolveRefAxis(16)
+    If profileOk And Not axisOk Then axisOk = SelectRevolveRefAxis(4)
+
+    selCount = swSelMgr.GetSelectedObjectCount2(-1)
+    SelectRevolveProfileAndRefAxis = profileOk And axisOk And selCount >= 2
+    DebugPrint "SelectRevolveProfileAndRefAxis: profile=" & profileName & " refAxis=" & gAxisName & _
+        " profileOk=" & profileOk & " axisOk=" & axisOk & " selCount=" & selCount
+    LogRevolveSelectionDetails
+End Function
+
+Private Sub AddColinearTotalAxialDimension(ByVal swLineHub As SldWorks.SketchSegment, ByVal swLineRim As SldWorks.SketchSegment, _
+    ByVal dimName As String, ByVal totalWidthMM As Double, ByVal textXM As Double, ByVal textYM As Double)
+    Dim swDispDim As Object
+    Dim swDim As SldWorks.Dimension
+    Dim showInput As Boolean
+
+    On Error Resume Next
+    If swLineHub Is Nothing Or swLineRim Is Nothing Then Exit Sub
+    ClearSWSelection
+    swLineHub.Select4 False, Nothing
+    swLineRim.Select4 True, Nothing
+    showInput = swApp.GetUserPreferenceToggle(swUserPreferenceToggle_e.swInputDimValOnCreate)
+    swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swInputDimValOnCreate, False
+    Set swDispDim = swModelDocExt.AddDimension(textXM, textYM, 0#, 3)
+    If swDispDim Is Nothing Then Set swDispDim = swModelDocExt.AddDimension(textXM, textYM, 0#, 1)
+    If swDispDim Is Nothing Then Set swDispDim = swDoc.AddDimension2(textXM, textYM, 0#)
+    swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swInputDimValOnCreate, showInput
+    If Not swDispDim Is Nothing Then
+        Set swDim = swDispDim.GetDimension2(0)
+        If Not swDim Is Nothing Then
+            swDim.SystemValue = totalWidthMM / MM_PER_M
+            swDim.Name = dimName
+        End If
+    End If
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+Private Function CreateRevolveBossFromSelection(ByRef methodUsed As String) As SldWorks.Feature
+    Dim lastErr As Long
+    Dim lastDesc As String
+    Dim selCount As Long
+
+    Set CreateRevolveBossFromSelection = Nothing
+    methodUsed = ""
+    On Error Resume Next
+    Err.Clear
+
+    selCount = swSelMgr.GetSelectedObjectCount2(-1)
+    If selCount < 2 Then
+        NoteGearBuildError "Revolve boss failed: fewer than 2 selected objects"
+        DebugPrint "CreateRevolveBossFromSelection: selCount=" & selCount
+        Exit Function
+    End If
+
+    LogRevolveSelectionDetails
+
+    Set CreateRevolveBossFromSelection = swFeatMgr.FeatureRevolve2( _
+        True, True, False, False, False, _
+        False, _
+        0, 0, _
+        6.2831853071796, 0#, _
+        False, False, _
+        0.01, 0.01, _
+        0, 0#, 0#, _
+        True, True, True)
+    If Not CreateRevolveBossFromSelection Is Nothing Then
+        methodUsed = "FeatureRevolve2"
+        swSelMgr.EnableContourSelection = False
+        Exit Function
+    End If
+    lastErr = Err.Number: lastDesc = Err.Description: Err.Clear
+
+    DebugPrint "CreateRevolveBossFromSelection failed: " & lastErr & " " & lastDesc
+    NoteGearBuildError "Revolve boss failed: " & lastErr & " " & lastDesc
+End Function
+
+' --- SOLIDWORKS: GearN_AxisLayout (Right Plane) --------------------------------
+' Hub/rim axial centre lines colinear to GearN_Axis; width dimensions for McMaster blank.
+Private Function CreateRevolveAxisLayoutSketch(ByVal zBase As Double, ByVal hubW As Double, ByVal rimW As Double) As Boolean
+    Dim swLineHub As SldWorks.SketchSegment
+    Dim swLineRim As SldWorks.SketchSegment
+    Dim axisSkName As String
+    Dim axisY As Double
+
+    CreateRevolveAxisLayoutSketch = False
+    Set swRevolveAxisSketchFeat = Nothing
+    gRevolveSketchFeatName = ""
+    gRevolveAxisSegSelectName = BuildGearBodyAxisSegName()
+    axisSkName = BuildGearAxisLayoutSketchName()
+    axisY = GetSketchAxisRadialY()
+
+    If Not BeginRightPlaneSketchWithRefAxis() Then Exit Function
+    DebugPrint "CreateRevolveAxisLayoutSketch: " & axisSkName & " axisY=" & Format(axisY * MM_PER_M, "0.###") & " mm"
+
+    Set swLineHub = swSketchManager.CreateCenterLine(zBase - hubW, axisY, 0, zBase, axisY, 0)
+    Set swLineRim = swSketchManager.CreateCenterLine(zBase, axisY, 0, zBase + rimW, axisY, 0)
+    If swLineHub Is Nothing Or swLineRim Is Nothing Then GoTo AxisLayoutFail
+
+    swLineHub.ConstructionGeometry = True
+    swLineRim.ConstructionGeometry = True
+    If Not mSketchAxisLine Is Nothing Then
+        ConstrainSketchSegmentColinearToSegment swLineHub, mSketchAxisLine
+        ConstrainSketchSegmentColinearToSegment swLineRim, mSketchAxisLine
+    End If
+    TryRenameSketchSegment swLineHub, BuildGearHubAxisSegName()
+    TryRenameSketchSegment swLineRim, BuildGearBodyAxisSegName()
+
+    AddLinearDimensionToLine swLineRim, GEAR_DIM_REVOLVE_RIM_WIDTH, GearGeom.RimWidthMM, zBase + rimW * 0.55, axisY + hubW * 0.35
+    AddColinearTotalAxialDimension swLineHub, swLineRim, GEAR_DIM_REVOLVE_TOTAL_AXIAL, GearGeom.WidthMM, zBase, axisY + hubW * 0.55
+
+    swSketchManager.InsertSketch True
+    Set swRevolveAxisSketchFeat = FindLastSketchFeature()
+    If swRevolveAxisSketchFeat Is Nothing Then GoTo AxisLayoutFail
+    RenameSketchFeatureSafe swRevolveAxisSketchFeat, axisSkName
+    gRevolveSketchFeatName = axisSkName
+
+    ClearSWSelection
+    RebuildSWPart
+    DebugPrint "CreateRevolveAxisLayoutSketch OK feat=" & gRevolveSketchFeatName
+    CreateRevolveAxisLayoutSketch = True
+    Exit Function
+
+AxisLayoutFail:
+    NoteGearBuildError "CreateRevolveAxisLayoutSketch failed (centerlines or dimensions)"
+    DebugPrint "CreateRevolveAxisLayoutSketch FAIL: " & gLastGearBuildError
+End Function
+
+' --- SOLIDWORKS: GearN_Body (Right Plane) --------------------------------------
+' Closed revolve profile; inner bore wall is shaft radius away from GearN_Axis.
+Private Function CreateRevolveProfileSketch(ByVal zBase As Double, ByVal hubW As Double, ByVal rimW As Double, _
+    ByVal shaftR As Double, ByVal hubR As Double, ByVal odR As Double) As Boolean
+    Dim profileSkName As String
+    Dim axisY As Double
+    Dim boreY As Double
+
+    CreateRevolveProfileSketch = False
+    Set swRevolveProfileSketchFeat = Nothing
+    gBlankSketchFeatName = ""
+    profileSkName = BuildGearRevolveProfileSketchName()
+
+    If Not BeginRightPlaneSketchWithRefAxis() Then Exit Function
+    axisY = GetSketchAxisRadialY()
+    boreY = axisY + shaftR
+    DebugPrint "CreateRevolveProfileSketch: " & profileSkName & " axisY=" & Format(axisY * MM_PER_M, "0.###") & _
+        " boreY=" & Format(boreY * MM_PER_M, "0.###") & " mm"
+
+    swSketchManager.CreateLine zBase - hubW, boreY, 0, zBase - hubW, axisY + hubR, 0
+    swSketchManager.CreateLine zBase - hubW, axisY + hubR, 0, zBase, axisY + hubR, 0
+    swSketchManager.CreateLine zBase, axisY + hubR, 0, zBase, axisY + odR, 0
+    swSketchManager.CreateLine zBase, axisY + odR, 0, zBase + rimW, axisY + odR, 0
+    swSketchManager.CreateLine zBase + rimW, axisY + odR, 0, zBase + rimW, boreY, 0
+    swSketchManager.CreateLine zBase + rimW, boreY, 0, zBase - hubW, boreY, 0
+
+    swSketchManager.InsertSketch True
+    Set swRevolveProfileSketchFeat = FindLastSketchFeature()
+    If swRevolveProfileSketchFeat Is Nothing Then GoTo ProfileFail
+    RenameSketchFeatureSafe swRevolveProfileSketchFeat, profileSkName
+    gBlankSketchFeatName = profileSkName
+
+    ClearSWSelection
+    RebuildSWPart
+    DebugPrint "CreateRevolveProfileSketch OK feat=" & gBlankSketchFeatName
+    CreateRevolveProfileSketch = True
+    Exit Function
+
+ProfileFail:
+    NoteGearBuildError "CreateRevolveProfileSketch failed (profile lines)"
+    DebugPrint "CreateRevolveProfileSketch FAIL: " & gLastGearBuildError
+End Function
+
+' --- SOLIDWORKS: Revolve1 ------------------------------------------------------
+' Selects GearN_Body (mark 0) + GearN_Axis (mark 16), then FeatureRevolve2 360 deg.
 Public Function CreateRevolveBlank() As Boolean
     On Error GoTo BlankFail
 
@@ -17,10 +316,8 @@ Public Function CreateRevolveBlank() As Boolean
     Dim shaftR As Double
     Dim hubR As Double
     Dim odR As Double
-    Dim swAxis As SketchSegment
-    Dim swBore As SketchSegment
-    Dim span As Double
     Dim zBase As Double
+    Dim revolveMethod As String
 
     CreateRevolveBlank = False
     DebugPrint "CreateRevolveBlank: begin hubW=" & Format(GearGeom.HubWidthMM, "0.###") & " rimW=" & Format(GearGeom.RimWidthMM, "0.###") & " mm"
@@ -29,68 +326,50 @@ Public Function CreateRevolveBlank() As Boolean
     shaftR = GearGeom.ShaftRadiusM
     hubR = GearGeom.HubRadiusM
     odR = GearGeom.AddendumRadiusM
-    span = hubW + rimW + shaftR
     zBase = gBossStartOffsetZM
 
-    ExitActiveSketchIfAny
-    If Not BeginSketchOnRightPlane() Then GoTo BlankFail
-    DebugPrint "CreateRevolveBlank: profile sketch on Right plane"
-
-    swSketchManager.CreateLine 0, zBase - hubW, 0, hubR, zBase - hubW, 0
-    swSketchManager.CreateLine hubR, zBase - hubW, 0, hubR, zBase, 0
-    swSketchManager.CreateLine hubR, zBase, 0, odR, zBase, 0
-    swSketchManager.CreateLine odR, zBase, 0, odR, zBase + rimW, 0
-    swSketchManager.CreateLine odR, zBase + rimW, 0, 0, zBase + rimW, 0
-    swSketchManager.CreateLine 0, zBase + rimW, 0, 0, zBase - hubW, 0
-
-    Set swBore = swSketchManager.CreateCircle(0, zBase, 0, shaftR, zBase, 0)
-    If swBore Is Nothing Then GoTo BlankFail
-
-    Set swAxis = swSketchManager.CreateCenterLine(0, zBase - span, 0, 0, zBase + span, 0)
-    If swAxis Is Nothing Then GoTo BlankFail
-
-    swSketchManager.InsertSketch True
-    Set swRevolveAxisSketchFeat = FindLastSketchFeature()
-    If Not swRevolveAxisSketchFeat Is Nothing Then gRevolveSketchFeatName = swRevolveAxisSketchFeat.Name
-
-    ClearSWSelection
-    swAxis.Select4 False, Nothing
-    swRevolveAxisSketchFeat.Select2 True, 0
-
-    DebugPrint "CreateRevolveBlank: FeatureRevolve..."
-    On Error Resume Next
-    Err.Clear
-    Set swRevolveFeat = swFeatMgr.FeatureRevolve2(True, True, False, False, False, 0, 2# * Pi, 0#, False, False, 0, 0#, 0, 0#, 0, True, False)
-    If swRevolveFeat Is Nothing Then
-        Set swRevolveFeat = swFeatMgr.FeatureRevolve(True, True, False, False, False, False, 0, 0, 2# * Pi, 0, 0, False, 0, 0, False, False, False, True, True, True)
-    End If
-    On Error GoTo BlankFail
-
-    If swRevolveFeat Is Nothing Then
-        DebugPrint "CreateRevolveBlank: FeatureRevolve failed"
+    If gAxisName = "" And swGearAxisFeat Is Nothing Then
+        NoteGearBuildError "CreateRevolveBlank: gear ref axis missing (create layout point axis first)"
         GoTo BlankFail
     End If
 
+    If Not CreateRevolveAxisLayoutSketch(zBase, hubW, rimW) Then GoTo BlankFail
+    If Not CreateRevolveProfileSketch(zBase, hubW, rimW, shaftR, hubR, odR) Then GoTo BlankFail
+
+    If Not SelectRevolveProfileAndRefAxis(swRevolveProfileSketchFeat) Then
+        NoteGearBuildError "CreateRevolveBlank: could not select profile sketch and ref axis"
+        DebugPrint gLastGearBuildError
+        GoTo BlankFail
+    End If
+
+    DebugPrint "CreateRevolveBlank: revolve boss..."
+    Set swRevolveFeat = CreateRevolveBossFromSelection(revolveMethod)
+    On Error GoTo BlankFail
+
+    If swRevolveFeat Is Nothing Then
+        DebugPrint "CreateRevolveBlank: revolve feature not created"
+        GoTo BlankFail
+    End If
+    DebugPrint "CreateRevolveBlank: " & revolveMethod & " -> " & swRevolveFeat.Name
+
     Set swAddendumExtrudeFeat = swRevolveFeat
-    gBlankSketchFeatName = gRevolveSketchFeatName
     ClearSWSelection
     RebuildSWPart
 
     DebugPrint "CreateRevolveBlank OK feat=" & swRevolveFeat.Name & _
-        " hubW=" & Format(GearGeom.HubWidthMM, "0.###") & " rimW=" & Format(GearGeom.RimWidthMM, "0.###") & " mm"
+        " refAxis=" & gAxisName & " profileSk=" & gBlankSketchFeatName
     CreateRevolveBlank = True
     Exit Function
 
 BlankFail:
     NoteGearBuildError FormatVBError("CreateRevolveBlank")
-    If gLastGearBuildError = "" Then NoteGearBuildError "CreateRevolveBlank failed (FeatureRevolve returned Nothing)"
+    If gLastGearBuildError = "" Then NoteGearBuildError "CreateRevolveBlank failed (revolve feature not created)"
     DebugPrint "CreateRevolveBlank FAIL: " & gLastGearBuildError
     CreateRevolveBlank = False
 End Function
 
-' ---------------------------------------------------------------------------
-' OD fillet (R = OD x 0.01) — non-fatal if edges cannot be selected
-' ---------------------------------------------------------------------------
+' --- SOLIDWORKS: Fillet1 (optional) --------------------------------------------
+' OD fillet R = OD x 0.01; skipped without error if no edges are selected.
 Public Function CreateMcMasterFillet() As Boolean
     On Error GoTo FilletFail
 
@@ -113,7 +392,7 @@ Public Function CreateMcMasterFillet() As Boolean
     End If
     swFeatData.Radius = filletR
     swFeatData.DefaultRadius = filletR
-    swFeatData.Type = swFilletType_e.swConstRadiusFillet
+    swFeatData.Type = SW_SIMPLE_FILLET_CONST_RADIUS
     Set swFilletFeat = swFeatMgr.CreateFeature(swFeatData)
     On Error GoTo FilletFail
 

@@ -56,6 +56,7 @@ Public swFrontPlaneFeat As SldWorks.Feature
 Public swGearAxisFeat As SldWorks.Feature
 Public swLayoutSketchFeat As SldWorks.Feature
 Public swRevolveAxisSketchFeat As SldWorks.Feature
+Public swRevolveProfileSketchFeat As SldWorks.Feature
 Public swRevolveFeat As SldWorks.Feature
 Public swAddendumExtrudeFeat As SldWorks.Feature
 Public swFilletFeat As SldWorks.Feature
@@ -128,8 +129,8 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
     On Error GoTo GenFail
 
     DebugLog = ""
-    gLastGearBuildStep = ""
     ClearLastGearBuildError
+    gLastGearBuildStep = ""
 
     Set swApp = Application.SldWorks
     GearBuildStep "SolidWorks application"
@@ -244,16 +245,15 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
 
     GearBuildStep "SetGearTrainSketchOffsetFromLayout"
     SetGearTrainSketchOffsetFromLayout
-    GearBuildStepOk "offset mm=(" & Format(gSketchOffsetXM * MM_PER_M, "0.###") & ", " & _
-        Format(gSketchOffsetYM * MM_PER_M, "0.###") & ") bossZ=" & Format(gBossStartOffsetZM * MM_PER_M, "0.###")
+    GearBuildStepOk FormatGearTrainOffsetSummary()
 
     GearBuildStep "CaptureSolidBodyCountBeforeGearBuild"
     CaptureSolidBodyCountBeforeGearBuild
-    GearBuildStepOk "bodies before=" & gGearSolidBodyCountBefore
+    GearBuildStepOk "bodies before=" & GetGearSolidBodyCountBefore()
 
     GearBuildStep "AssignCurrentGearIndex"
     AssignCurrentGearIndex
-    GearBuildStepOk "index=" & gCurrentGearIndex
+    GearBuildStepOk "index=" & GetCurrentGearIndex()
 
     GearBuildStep "CreateGearGlobalVariableEquations"
     CreateGearGlobalVariableEquations
@@ -264,14 +264,21 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
         GearBuildStepFail
         GoTo GenFail
     End If
-    GearBuildStepOk "axis=" & gAxisName
+    GearBuildStepOk "axis=" & GetGearAxisName()
 
     GearBuildStep "CreateMasterLayoutSketch"
     If Not CreateMasterLayoutSketch() Then
         GearBuildStepFail
         GoTo GenFail
     End If
-    GearBuildStepOk gLayoutSketchFeatName
+    GearBuildStepOk GetLayoutSketchFeatName()
+
+    GearBuildStep "CreateGearRefAxisFromLayoutPoint"
+    If Not CreateGearRefAxisFromLayoutSketchPoint() Then
+        GearBuildStepFail
+        GoTo GenFail
+    End If
+    GearBuildStepOk GetGearAxisName()
 
     GearBuildStep "CreateRevolveBlank"
     If Not CreateRevolveBlank() Then
@@ -292,7 +299,7 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
         GearBuildStepFail
         GoTo GenFail
     End If
-    GearBuildStepOk gGapSketchFeatName
+    GearBuildStepOk GetGapSketchFeatName()
 
     GearBuildStep "CutExtrudeToothGap"
     If Not CutExtrudeToothGap() Then
@@ -321,9 +328,7 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
 
     GearBuildStep "NameGearAxisForCurrentBuild"
     NameGearAxisForCurrentBuild
-    GearBuildStepOk gAxisName
-
-    GearBuildStep "LinkGearMcMasterEquations"
+    GearBuildStepOk GetGearAxisName()
     LinkGearMcMasterEquations
     GearBuildStepOk
 

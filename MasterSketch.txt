@@ -1,30 +1,56 @@
 Option Explicit
 
-' FEATURE: Master layout sketch (Sketch1) — OD, Pitch, Root, Hub, Shaft construction circles.
-' Paste into VBA module: MasterSketch
+' =============================================================================
+' FEATURE: Master layout sketch  ->  SolidWorks feature:  GearN_Layout  (Front Plane)
+' =============================================================================
+' Creates:
+'   - Sketch point   GearN_Center     (gear axis centre on Front plane)
+'   - Construction circles (OD, Pitch, Root, Hub, Shaft) concentric to GearN_Center
+'   - Dimensions: InvoluteGear_OD, PitchDia, RootDia, HubDia, ShaftDia
+'   - Driven only: InvoluteGear_LayoutCenterDist from prior gear's Gear(N-1)_Center
 '
-' Depends on Involute1: GearGeom, swLayoutSketchFeat, swSketchManager, sw2DSketch
-' Depends on GearLib: GEAR_DIM_LAYOUT_*, sketch helpers, DebugPrint
+' Next step in GenerateGear: CreateGearRefAxisFromLayoutPoint  ->  GearN_Axis
+' =============================================================================
 
 Public Function CreateMasterLayoutSketch() As Boolean
     On Error GoTo LayoutFail
 
     Dim swCircles(1 To 5) As SldWorks.SketchSegment
+    Dim swCenterPt As SldWorks.SketchPoint
     Dim labels(1 To 5) As String
     Dim diams(1 To 5) As Double
+    Dim layoutSkName As String
     Dim i As Long
     Dim cx As Double
     Dim cy As Double
 
     CreateMasterLayoutSketch = False
     DebugPrint "CreateMasterLayoutSketch: --- begin ---"
-    cx = gSketchOffsetXM
-    cy = gSketchOffsetYM
+    layoutSkName = BuildGearLayoutSketchName()          ' e.g. Gear1_Layout
+    gLayoutCenterPointName = BuildGearLayoutCenterPointName()  ' e.g. Gear1_Center
 
+    ' Driving gear uses part Origin. Driven gear uses layout offset from SetGearTrainSketchOffsetFromLayout.
+    If GearTrainRole = GEAR_ROLE_DRIVING Then
+        cx = 0#
+        cy = 0#
+    Else
+        cx = gSketchOffsetXM
+        cy = gSketchOffsetYM
+    End If
+    DebugPrint "CreateMasterLayoutSketch: centre (mm)=(" & Format(cx * MM_PER_M, "0.###") & ", " & Format(cy * MM_PER_M, "0.###") & ")"
+
+    ' --- Open Front Plane sketch -------------------------------------------------
     If Not BeginSketchOnFrontPlane() Then GoTo LayoutFail
     Set sw2DSketch = swSketchManager.ActiveSketch
     Set swLayoutSketchFeat = Nothing
 
+    ' --- GearN_Center point ------------------------------------------------------
+    Set swCenterPt = swSketchManager.CreatePoint(cx, cy, 0)
+    If swCenterPt Is Nothing Then GoTo LayoutFail
+    ConstrainLayoutCenterPointForRole swCenterPt   ' coincident Origin OR dim from driving centre
+    TryRenameSketchPoint swCenterPt, gLayoutCenterPointName
+
+    ' --- Construction circles (all concentric to GearN_Center) -------------------
     labels(1) = GEAR_DIM_LAYOUT_OD: diams(1) = GearGeom.AddendumDiameterMM
     labels(2) = GEAR_DIM_LAYOUT_PITCH: diams(2) = GearGeom.PitchDiameterMM
     labels(3) = GEAR_DIM_LAYOUT_ROOT: diams(3) = GearGeom.DedendumDiameterMM
@@ -35,21 +61,20 @@ Public Function CreateMasterLayoutSketch() As Boolean
         Set swCircles(i) = swSketchManager.CreateCircle(cx, cy, 0, cx + diams(i) / MM_PER_M / 2#, cy, 0)
         If swCircles(i) Is Nothing Then GoTo LayoutFail
         swCircles(i).ConstructionGeometry = True
+        ConstrainSketchPointConcentricToCircle swCenterPt, swCircles(i)
         AddDiameterDimensionToCircle swCircles(i), labels(i), diams(i)
     Next i
 
-    ConstrainSketchSegmentsConcentric swCircles(1), swCircles(2)
-    ConstrainSketchSegmentsConcentric swCircles(1), swCircles(3)
-    ConstrainSketchSegmentsConcentric swCircles(1), swCircles(4)
-    ConstrainSketchSegmentsConcentric swCircles(1), swCircles(5)
-
+    ' --- Close sketch and rename feature to GearN_Layout -------------------------
     swSketchManager.InsertSketch True
     Set swLayoutSketchFeat = FindLastSketchFeature()
-    If Not swLayoutSketchFeat Is Nothing Then gLayoutSketchFeatName = swLayoutSketchFeat.Name
+    If swLayoutSketchFeat Is Nothing Then GoTo LayoutFail
+    RenameSketchFeatureSafe swLayoutSketchFeat, layoutSkName
+    gLayoutSketchFeatName = layoutSkName
 
     ClearSWSelection
     RebuildSWPart
-    DebugPrint "CreateMasterLayoutSketch OK feat=" & gLayoutSketchFeatName
+    DebugPrint "CreateMasterLayoutSketch OK feat=" & gLayoutSketchFeatName & " centre=" & gLayoutCenterPointName
     CreateMasterLayoutSketch = True
     Exit Function
 
