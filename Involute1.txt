@@ -55,6 +55,7 @@ Public Const MM_PER_M As Double = 1000#
 Public swFrontPlaneFeat As SldWorks.Feature
 Public swGearAxisFeat As SldWorks.Feature
 Public swLayoutSketchFeat As SldWorks.Feature
+Public swLayoutCenterPt As SldWorks.SketchPoint
 Public swRevolveAxisSketchFeat As SldWorks.Feature
 Public swRevolveProfileSketchFeat As SldWorks.Feature
 Public swRevolveFeat As SldWorks.Feature
@@ -67,6 +68,7 @@ Public swCombineFeat As SldWorks.Feature
 
 Public Pi As Double
 Public boolstatus As Boolean
+Public DebugLog As String
 
 ' Gear train / mesh layout (driven gear picks up params from driving gear body)
 Public Const GEAR_ROLE_DRIVING As Long = 0
@@ -94,6 +96,11 @@ Public GearTrainDrivingComboBodyName() As String
 
 ' True while the gear form is open; main() loops with DoEvents so SW stays interactive (modeless pick)
 Public gbGearFormOpen As Boolean
+
+Public Sub DebugPrint(ByVal msg As String)
+    Debug.Print msg
+    DebugLog = DebugLog & msg & vbCrLf
+End Sub
 
 Public Sub CloseGearForm()
     gbGearFormOpen = False

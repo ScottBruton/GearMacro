@@ -4,13 +4,10 @@ Option Explicit
 ' FEATURE: Gear body blank  (McMaster revolve workflow)
 ' =============================================================================
 ' GenerateGear order for this module:
-'   1. CreateRevolveAxisLayoutSketch  ->  GearN_AxisLayout  (Right Plane)
-'        - Converts GearN_Axis into sketch; hub/rim centre lines colinear to axis
-'        - Dims: InvoluteGear_RimWidth, InvoluteGear_TotalAxial
-'   2. CreateRevolveProfileSketch     ->  GearN_Body       (Right Plane)
-'        - L-section profile; bore inner edge offset from GearN_Axis by shaft radius
-'   3. SelectRevolveProfileAndRefAxis + FeatureRevolve2  ->  Revolve1 (solid blank)
-'   4. CreateMcMasterFillet           ->  Fillet1 (OD fillet, non-fatal if skipped)
+'   1. CreateRevolveProfileSketch     ->  GearN_Body       (Right Plane)
+'        - L-section profile + width dimensions
+'   2. SelectRevolveProfileAndRefAxis + FeatureRevolve2  ->  Revolve1 (solid blank)
+'   3. CreateMcMasterFillet           ->  Fillet1 (OD fillet, non-fatal if skipped)
 '
 ' Prerequisite (Involute1 / GearLib): GearN_Layout, GearN_Center, GearN_Axis already exist
 ' =============================================================================
@@ -212,68 +209,21 @@ Private Function CreateRevolveBossFromSelection(ByRef methodUsed As String) As S
     NoteGearBuildError "Revolve boss failed: " & lastErr & " " & lastDesc
 End Function
 
-' --- SOLIDWORKS: GearN_AxisLayout (Right Plane) --------------------------------
-' Hub/rim axial centre lines colinear to GearN_Axis; width dimensions for McMaster blank.
-Private Function CreateRevolveAxisLayoutSketch(ByVal zBase As Double, ByVal hubW As Double, ByVal rimW As Double) As Boolean
-    Dim swLineHub As SldWorks.SketchSegment
-    Dim swLineRim As SldWorks.SketchSegment
-    Dim axisSkName As String
-    Dim axisY As Double
-
-    CreateRevolveAxisLayoutSketch = False
-    Set swRevolveAxisSketchFeat = Nothing
-    gRevolveSketchFeatName = ""
-    gRevolveAxisSegSelectName = BuildGearBodyAxisSegName()
-    axisSkName = BuildGearAxisLayoutSketchName()
-    axisY = GetSketchAxisRadialY()
-
-    If Not BeginRightPlaneSketchWithRefAxis() Then Exit Function
-    DebugPrint "CreateRevolveAxisLayoutSketch: " & axisSkName & " axisY=" & Format(axisY * MM_PER_M, "0.###") & " mm"
-
-    Set swLineHub = swSketchManager.CreateCenterLine(zBase - hubW, axisY, 0, zBase, axisY, 0)
-    Set swLineRim = swSketchManager.CreateCenterLine(zBase, axisY, 0, zBase + rimW, axisY, 0)
-    If swLineHub Is Nothing Or swLineRim Is Nothing Then GoTo AxisLayoutFail
-
-    swLineHub.ConstructionGeometry = True
-    swLineRim.ConstructionGeometry = True
-    If Not mSketchAxisLine Is Nothing Then
-        ConstrainSketchSegmentColinearToSegment swLineHub, mSketchAxisLine
-        ConstrainSketchSegmentColinearToSegment swLineRim, mSketchAxisLine
-    End If
-    TryRenameSketchSegment swLineHub, BuildGearHubAxisSegName()
-    TryRenameSketchSegment swLineRim, BuildGearBodyAxisSegName()
-
-    AddLinearDimensionToLine swLineRim, GEAR_DIM_REVOLVE_RIM_WIDTH, GearGeom.RimWidthMM, zBase + rimW * 0.55, axisY + hubW * 0.35
-    AddColinearTotalAxialDimension swLineHub, swLineRim, GEAR_DIM_REVOLVE_TOTAL_AXIAL, GearGeom.WidthMM, zBase, axisY + hubW * 0.55
-
-    swSketchManager.InsertSketch True
-    Set swRevolveAxisSketchFeat = FindLastSketchFeature()
-    If swRevolveAxisSketchFeat Is Nothing Then GoTo AxisLayoutFail
-    RenameSketchFeatureSafe swRevolveAxisSketchFeat, axisSkName
-    gRevolveSketchFeatName = axisSkName
-
-    ClearSWSelection
-    RebuildSWPart
-    DebugPrint "CreateRevolveAxisLayoutSketch OK feat=" & gRevolveSketchFeatName
-    CreateRevolveAxisLayoutSketch = True
-    Exit Function
-
-AxisLayoutFail:
-    NoteGearBuildError "CreateRevolveAxisLayoutSketch failed (centerlines or dimensions)"
-    DebugPrint "CreateRevolveAxisLayoutSketch FAIL: " & gLastGearBuildError
-End Function
-
 ' --- SOLIDWORKS: GearN_Body (Right Plane) --------------------------------------
-' Closed revolve profile; inner bore wall is shaft radius away from GearN_Axis.
+' Closed revolve profile; width dims live in this sketch (no separate axis-layout sketch).
 Private Function CreateRevolveProfileSketch(ByVal zBase As Double, ByVal hubW As Double, ByVal rimW As Double, _
     ByVal shaftR As Double, ByVal hubR As Double, ByVal odR As Double) As Boolean
     Dim profileSkName As String
     Dim axisY As Double
     Dim boreY As Double
+    Dim swLineHub As SldWorks.SketchSegment
+    Dim swLineRim As SldWorks.SketchSegment
 
     CreateRevolveProfileSketch = False
     Set swRevolveProfileSketchFeat = Nothing
+    Set swRevolveAxisSketchFeat = Nothing
     gBlankSketchFeatName = ""
+    gRevolveSketchFeatName = ""
     profileSkName = BuildGearRevolveProfileSketchName()
 
     If Not BeginRightPlaneSketchWithRefAxis() Then Exit Function
@@ -281,6 +231,18 @@ Private Function CreateRevolveProfileSketch(ByVal zBase As Double, ByVal hubW As
     boreY = axisY + shaftR
     DebugPrint "CreateRevolveProfileSketch: " & profileSkName & " axisY=" & Format(axisY * MM_PER_M, "0.###") & _
         " boreY=" & Format(boreY * MM_PER_M, "0.###") & " mm"
+
+    Set swLineHub = swSketchManager.CreateCenterLine(zBase - hubW, axisY, 0, zBase, axisY, 0)
+    Set swLineRim = swSketchManager.CreateCenterLine(zBase, axisY, 0, zBase + rimW, axisY, 0)
+    If swLineHub Is Nothing Or swLineRim Is Nothing Then GoTo ProfileFail
+    swLineHub.ConstructionGeometry = True
+    swLineRim.ConstructionGeometry = True
+    If Not mSketchAxisLine Is Nothing Then
+        ConstrainSketchSegmentColinearToSegment swLineHub, mSketchAxisLine
+        ConstrainSketchSegmentColinearToSegment swLineRim, mSketchAxisLine
+    End If
+    AddLinearDimensionToLine swLineRim, GEAR_DIM_REVOLVE_RIM_WIDTH, GearGeom.RimWidthMM, zBase + rimW * 0.55, axisY + hubW * 0.35
+    AddColinearTotalAxialDimension swLineHub, swLineRim, GEAR_DIM_REVOLVE_TOTAL_AXIAL, GearGeom.WidthMM, zBase, axisY + hubW * 0.55
 
     swSketchManager.CreateLine zBase - hubW, boreY, 0, zBase - hubW, axisY + hubR, 0
     swSketchManager.CreateLine zBase - hubW, axisY + hubR, 0, zBase, axisY + hubR, 0
@@ -294,6 +256,7 @@ Private Function CreateRevolveProfileSketch(ByVal zBase As Double, ByVal hubW As
     If swRevolveProfileSketchFeat Is Nothing Then GoTo ProfileFail
     RenameSketchFeatureSafe swRevolveProfileSketchFeat, profileSkName
     gBlankSketchFeatName = profileSkName
+    gRevolveSketchFeatName = profileSkName
 
     ClearSWSelection
     RebuildSWPart
@@ -302,7 +265,7 @@ Private Function CreateRevolveProfileSketch(ByVal zBase As Double, ByVal hubW As
     Exit Function
 
 ProfileFail:
-    NoteGearBuildError "CreateRevolveProfileSketch failed (profile lines)"
+    NoteGearBuildError "CreateRevolveProfileSketch failed (profile lines or dimensions)"
     DebugPrint "CreateRevolveProfileSketch FAIL: " & gLastGearBuildError
 End Function
 
@@ -333,7 +296,6 @@ Public Function CreateRevolveBlank() As Boolean
         GoTo BlankFail
     End If
 
-    If Not CreateRevolveAxisLayoutSketch(zBase, hubW, rimW) Then GoTo BlankFail
     If Not CreateRevolveProfileSketch(zBase, hubW, rimW, shaftR, hubR, odR) Then GoTo BlankFail
 
     If Not SelectRevolveProfileAndRefAxis(swRevolveProfileSketchFeat) Then

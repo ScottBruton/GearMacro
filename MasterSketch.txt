@@ -9,7 +9,7 @@ Option Explicit
 '   - Dimensions: InvoluteGear_OD, PitchDia, RootDia, HubDia, ShaftDia
 '   - Driven only: InvoluteGear_LayoutCenterDist from prior gear's Gear(N-1)_Center
 '
-' Next step in GenerateGear: CreateGearRefAxisFromLayoutPoint  ->  GearN_Axis
+' Next step in GenerateGear: CreateGearRefAxisFromLayoutSketchPoint  ->  GearN_Axis (one ref axis)
 ' =============================================================================
 
 Public Function CreateMasterLayoutSketch() As Boolean
@@ -43,10 +43,12 @@ Public Function CreateMasterLayoutSketch() As Boolean
     If Not BeginSketchOnFrontPlane() Then GoTo LayoutFail
     Set sw2DSketch = swSketchManager.ActiveSketch
     Set swLayoutSketchFeat = Nothing
+    Set swLayoutCenterPt = Nothing
 
     ' --- GearN_Center point ------------------------------------------------------
     Set swCenterPt = swSketchManager.CreatePoint(cx, cy, 0)
     If swCenterPt Is Nothing Then GoTo LayoutFail
+    Set swLayoutCenterPt = swCenterPt
     ConstrainLayoutCenterPointForRole swCenterPt   ' coincident Origin OR dim from driving centre
     TryRenameSketchPoint swCenterPt, gLayoutCenterPointName
 

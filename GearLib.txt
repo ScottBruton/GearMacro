@@ -10,8 +10,8 @@
 ' =============================================================================
 ' GEARCOMMON
 ' =============================================================================
+' DebugPrint / DebugLog are defined in Involute1 (one copy only — avoids ambiguous name).
 
-Public DebugLog As String
 Public gLastGearBuildStep As String
 Public gLastGearBuildError As String
 Public gSketchOffsetXM As Double
@@ -70,11 +70,6 @@ Public Const GEAR_PROP_ADDENDUM_DIA As String = "InvoluteGear_AddendumDiameter"
 Public Const GEAR_PROP_IS_INTERNAL As String = "InvoluteGear_IsInternal"
 Public Const GEAR_PROP_GEAR_INDEX As String = "InvoluteGear_Index"
 Public Const GEAR_AXIS_NAME_SUFFIX As String = " Axis"
-
-Public Sub DebugPrint(ByVal msg As String)
-    Debug.Print msg
-    DebugLog = DebugLog & msg & vbCrLf
-End Sub
 
 Public Sub ClearLastGearBuildError()
     gLastGearBuildError = ""
@@ -209,6 +204,8 @@ Public Sub ResetGearBuildFeatureRefs()
     gFrontPlaneName = ""
     Set swGearAxisFeat = Nothing
     Set swLayoutSketchFeat = Nothing
+    Set swLayoutCenterPt = Nothing
+    Set swLayoutCenterPt = Nothing
     Set swRevolveAxisSketchFeat = Nothing
     Set swRevolveProfileSketchFeat = Nothing
     Set swRevolveFeat = Nothing
@@ -1071,125 +1068,195 @@ Public Function ConvertRefAxisIntoActiveSketch() As SldWorks.SketchSegment
     On Error GoTo 0
 End Function
 
-' InsertAxis2 helper — tries point+plane and plane+point selection orders.
-Private Function InsertRefAxisFrontPlaneAndSketchPoint(ByVal ptId As String, ByVal ptX As Double, ByVal ptY As Double) As Boolean
-    Dim docTitle As String
+Private Function GetLayoutCenterSketchPoint() As SldWorks.SketchPoint
+    Dim swSketch As SldWorks.Sketch
+    Dim vPts As Variant
+    Dim swPt As SldWorks.SketchPoint
+    Dim cx As Double
+    Dim cy As Double
+    Dim bestD As Double
+    Dim d As Double
+    Dim x As Double
+    Dim y As Double
+    Dim z As Double
+    Dim i As Long
+    Dim ptCoords As Variant
 
-    InsertRefAxisFrontPlaneAndSketchPoint = False
-    If ptId = "" Then Exit Function
-    If swFrontPlaneFeat Is Nothing Then
-        If Not ResolveAndStoreFrontPlane() Then Exit Function
+    Set GetLayoutCenterSketchPoint = Nothing
+    Set swLayoutCenterPt = Nothing
+    If swLayoutSketchFeat Is Nothing Then Exit Function
+
+    cx = gSketchOffsetXM
+    cy = gSketchOffsetYM
+    If GearTrainRole = GEAR_ROLE_DRIVING Then
+        cx = 0#
+        cy = 0#
     End If
-    docTitle = swDoc.GetTitle
 
     On Error Resume Next
-    ExitActiveSketchIfAny
-    ClearSWSelection
+    Set swSketch = swLayoutSketchFeat.GetSpecificFeature2
+    If swSketch Is Nothing Then Exit Function
+    vPts = swSketch.GetSketchPoints2
+    If Not IsArray(vPts) Then Exit Function
 
-    boolstatus = swModelDocExt.SelectByID2(ptId, "EXTSKETCHPOINT", ptX, ptY, 0#, False, 0, Nothing, 0)
-    If Not boolstatus And docTitle <> "" Then
-        boolstatus = swModelDocExt.SelectByID2(ptId & "@" & docTitle, "EXTSKETCHPOINT", ptX, ptY, 0#, False, 0, Nothing, 0)
-    End If
-    If boolstatus Then SelectPlaneFeature swFrontPlaneFeat, True
-    If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
-    If boolstatus Then
-        InsertRefAxisFrontPlaneAndSketchPoint = True
-        DebugPrint "InsertRefAxisFrontPlaneAndSketchPoint OK (point+plane): " & ptId
-        ClearSWSelection
-        Exit Function
-    End If
-
-    ClearSWSelection
-    SelectPlaneFeature swFrontPlaneFeat, False
-    boolstatus = swModelDocExt.SelectByID2(ptId, "EXTSKETCHPOINT", ptX, ptY, 0#, True, 0, Nothing, 0)
-    If Not boolstatus And docTitle <> "" Then
-        boolstatus = swModelDocExt.SelectByID2(ptId & "@" & docTitle, "EXTSKETCHPOINT", ptX, ptY, 0#, True, 0, Nothing, 0)
-    End If
-    If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
-    If boolstatus Then
-        InsertRefAxisFrontPlaneAndSketchPoint = True
-        DebugPrint "InsertRefAxisFrontPlaneAndSketchPoint OK (plane+point): " & ptId
-        ClearSWSelection
-        Exit Function
-    End If
-
-    ClearSWSelection
-    boolstatus = swModelDocExt.SelectByID2(gFrontPlaneName, "PLANE", 0, 0, 0, False, 0, Nothing, 0)
-    If Not boolstatus Then boolstatus = swModelDocExt.SelectByID2("Front Plane", "PLANE", 0, 0, 0, False, 0, Nothing, 0)
-    If boolstatus Then
-        boolstatus = swModelDocExt.SelectByID2(ptId, "EXTSKETCHPOINT", ptX, ptY, 0#, True, 0, Nothing, 0)
-        If Not boolstatus And docTitle <> "" Then
-            boolstatus = swModelDocExt.SelectByID2(ptId & "@" & docTitle, "EXTSKETCHPOINT", ptX, ptY, 0#, True, 0, Nothing, 0)
-        End If
-    End If
-    If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
-    If boolstatus Then
-        InsertRefAxisFrontPlaneAndSketchPoint = True
-        DebugPrint "InsertRefAxisFrontPlaneAndSketchPoint OK (PLANE id+point): " & ptId
-    Else
-        DebugPrint "InsertRefAxisFrontPlaneAndSketchPoint FAIL: " & ptId
-    End If
-    ClearSWSelection
-    On Error GoTo 0
-End Function
-
-Private Function InsertGearRefAxisAtLayoutCenterOnFrontPlane() As Boolean
-    Dim skName As String
-    Dim ptIds(1 To 4) As String
-    Dim i As Long
-    Dim ptX As Double
-    Dim ptY As Double
-
-    InsertGearRefAxisAtLayoutCenterOnFrontPlane = False
-    skName = gLayoutSketchFeatName
-    If skName = "" Then skName = BuildGearLayoutSketchName()
-    ptX = gSketchOffsetXM
-    ptY = gSketchOffsetYM
-    If GearTrainRole = GEAR_ROLE_DRIVING Then
-        ptX = 0#
-        ptY = 0#
-    End If
-
-    ptIds(1) = "Point1@" & skName
-    ptIds(2) = BuildLayoutCenterPointSelectId()
-    ptIds(3) = BuildGearLayoutCenterPointName() & "@" & skName
-    If GearTrainRole = GEAR_ROLE_DRIVING Then
-        ptIds(4) = "Point1@Origin"
-    Else
-        ptIds(4) = ""
-    End If
-
-    For i = 1 To 4
-        If ptIds(i) <> "" Then
-            If InsertRefAxisFrontPlaneAndSketchPoint(ptIds(i), ptX, ptY) Then
-                InsertGearRefAxisAtLayoutCenterOnFrontPlane = True
-                Exit Function
+    bestD = 1E+30
+    For i = LBound(vPts) To UBound(vPts)
+        Set swPt = vPts(i)
+        If Not swPt Is Nothing Then
+            ptCoords = swPt.GetCoords
+            If IsArray(ptCoords) Then
+                If UBound(ptCoords) >= 1 Then
+                    x = ptCoords(0)
+                    y = ptCoords(1)
+                    If UBound(ptCoords) >= 2 Then z = ptCoords(2)
+                End If
+            End If
+            d = (x - cx) ^ 2 + (y - cy) ^ 2
+            If d < bestD Then
+                bestD = d
+                Set GetLayoutCenterSketchPoint = swPt
             End If
         End If
     Next i
+    If Not GetLayoutCenterSketchPoint Is Nothing Then
+        Set swLayoutCenterPt = GetLayoutCenterSketchPoint
+    End If
+    On Error GoTo 0
+End Function
 
-    On Error Resume Next
+Private Sub DeleteAllRefAxisFeaturesExcept(Optional ByVal keepName As String = "")
+    Dim ft As SldWorks.Feature
+    Dim names() As String
+    Dim i As Long
+    Dim n As Long
+
+    n = 0
+    ReDim names(0 To 0)
+    Set ft = swPart.FirstFeature
+    Do While Not ft Is Nothing
+        If FeatureIsRefAxis(ft) Then
+            If keepName = "" Or StrComp(ft.Name, keepName, vbTextCompare) <> 0 Then
+                ReDim Preserve names(0 To n)
+                names(n) = ft.Name
+                n = n + 1
+            End If
+        End If
+        Set ft = ft.GetNextFeature
+    Loop
+
+    For i = 0 To n - 1
+        On Error Resume Next
+        ClearSWSelection
+        If swModelDocExt.SelectByID2(names(i), "AXIS", 0, 0, 0, False, 0, Nothing, 0) Then
+            swDoc.EditDelete
+        ElseIf swModelDocExt.SelectByID2(names(i), "REFAXIS", 0, 0, 0, False, 0, Nothing, 0) Then
+            swDoc.EditDelete
+        End If
+        ClearSWSelection
+        On Error GoTo 0
+    Next i
+    If n > 0 Then RebuildSWPart
+End Sub
+
+' InsertAxis2: Front Plane first, then sketch point (SW API order).
+Private Function InsertSingleRefAxisFrontPlaneAndSketchPoint(ByVal swPt As SldWorks.SketchPoint) As Boolean
+    Dim nBefore As Long
+    Dim nAfter As Long
+    Dim selOk As Boolean
+
+    InsertSingleRefAxisFrontPlaneAndSketchPoint = False
+    If swPt Is Nothing Then
+        DebugPrint "InsertSingleRefAxisFrontPlaneAndSketchPoint: no sketch point"
+        Exit Function
+    End If
+    If swFrontPlaneFeat Is Nothing Then
+        If Not ResolveAndStoreFrontPlane() Then Exit Function
+    End If
+
+    nBefore = CountRefAxisFeatures()
     ExitActiveSketchIfAny
     ClearSWSelection
-    SelectPlaneFeature swFrontPlaneFeat, True
-    boolstatus = swModelDocExt.SelectByID2("", "EXTSKETCHPOINT", ptX, ptY, 0#, True, 0, Nothing, 0)
-    If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
+    RebuildSWPart
+
+    On Error Resume Next
+    selOk = SelectFrontPlaneFeature(False)
+    If selOk Then selOk = swPt.Select4(True, Nothing)
+    If selOk Then selOk = swDoc.InsertAxis2(True)
     ClearSWSelection
     On Error GoTo 0
-    InsertGearRefAxisAtLayoutCenterOnFrontPlane = boolstatus
-    If boolstatus Then DebugPrint "InsertGearRefAxisAtLayoutCenterOnFrontPlane OK (anonymous pierce point)"
+
+    nAfter = CountRefAxisFeatures()
+    If nAfter = nBefore + 1 Then
+        InsertSingleRefAxisFrontPlaneAndSketchPoint = True
+        DebugPrint "InsertSingleRefAxisFrontPlaneAndSketchPoint OK (count " & nBefore & " -> " & nAfter & ")"
+    Else
+        If nAfter > nBefore Then DeleteAllRefAxisFeaturesExcept
+        DebugPrint "InsertSingleRefAxisFrontPlaneAndSketchPoint FAIL (count " & nBefore & " -> " & nAfter & " selOk=" & selOk & ")"
+    End If
+End Function
+
+' Driving gear at origin: Front Plane + Point1@Origin (no layout point lookup).
+Private Function InsertSingleRefAxisFrontPlaneAndOrigin() As Boolean
+    Dim nBefore As Long
+    Dim nAfter As Long
+    Dim selOk As Boolean
+
+    InsertSingleRefAxisFrontPlaneAndOrigin = False
+    If swFrontPlaneFeat Is Nothing Then
+        If Not ResolveAndStoreFrontPlane() Then Exit Function
+    End If
+
+    nBefore = CountRefAxisFeatures()
+    ExitActiveSketchIfAny
+    ClearSWSelection
+    RebuildSWPart
+
+    On Error Resume Next
+    selOk = SelectFrontPlaneFeature(False)
+    If selOk Then selOk = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0#, 0#, 0#, True, 0, Nothing, 0)
+    If selOk Then selOk = swDoc.InsertAxis2(True)
+    ClearSWSelection
+    On Error GoTo 0
+
+    nAfter = CountRefAxisFeatures()
+    If nAfter = nBefore + 1 Then
+        InsertSingleRefAxisFrontPlaneAndOrigin = True
+        DebugPrint "InsertSingleRefAxisFrontPlaneAndOrigin OK (count " & nBefore & " -> " & nAfter & ")"
+    Else
+        If nAfter > nBefore Then DeleteAllRefAxisFeaturesExcept
+        DebugPrint "InsertSingleRefAxisFrontPlaneAndOrigin FAIL (count " & nBefore & " -> " & nAfter & " selOk=" & selOk & ")"
+    End If
 End Function
 
 ' =============================================================================
-' SOLIDWORKS: GearN_Axis  (Reference Geometry > Axis)
-' InsertAxis2: Front Plane + GearN_Center@GearN_Layout from layout sketch.
-' Called from GenerateGear immediately after CreateMasterLayoutSketch.
+' SOLIDWORKS: GearN_Axis  (Reference Geometry > Axis) — exactly ONE per gear
+' Front Plane + GearN_Center from layout sketch (Select4, not SelectByID2 strings).
 ' =============================================================================
 Public Function CreateGearRefAxisFromLayoutSketchPoint() As Boolean
     Dim axisCountBefore As Long
-    Dim skName As String
+    Dim axisName As String
+    Dim existingAxis As SldWorks.Feature
+    Dim swPt As SldWorks.SketchPoint
 
     CreateGearRefAxisFromLayoutSketchPoint = False
+    DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: single-axis path (GearLib paste check)"
+    axisName = BuildGearRefAxisName()
+
+    Set existingAxis = FindRefAxisFeatureByName(axisName)
+    If Not existingAxis Is Nothing Then
+        DeleteAllRefAxisFeaturesExcept axisName
+        Set swGearAxisFeat = existingAxis
+        ApplyGearAxisFeatureName swGearAxisFeat, axisName
+        CreateGearRefAxisFromLayoutSketchPoint = True
+        DebugPrint "CreateGearRefAxisFromLayoutSketchPoint OK (reuse): " & gAxisName
+        Exit Function
+    End If
+
+    If CountRefAxisFeatures() > 0 Then
+        DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: removing orphan ref axis(es) from prior failed run"
+        DeleteAllRefAxisFeaturesExcept
+    End If
+
     If swFrontPlaneFeat Is Nothing Then
         If Not ResolveAndStoreFrontPlane() Then
             DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: Front Plane not found"
@@ -1197,22 +1264,31 @@ Public Function CreateGearRefAxisFromLayoutSketchPoint() As Boolean
         End If
     End If
 
-    skName = gLayoutSketchFeatName
-    If skName = "" Then skName = BuildGearLayoutSketchName()
     axisCountBefore = CountRefAxisFeatures()
 
-    RebuildSWPart
-
-    If Not InsertGearRefAxisAtLayoutCenterOnFrontPlane() Then
-        DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: InsertAxis2 failed (tried Point1@" & skName & ", layout centre, Origin)"
-        Exit Function
+    If GearTrainRole = GEAR_ROLE_DRIVING And Abs(gSketchOffsetXM) < 0.00001 And Abs(gSketchOffsetYM) < 0.00001 Then
+        If Not InsertSingleRefAxisFrontPlaneAndOrigin() Then
+            DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: could not create ref axis at Origin"
+            Exit Function
+        End If
+    Else
+        Set swPt = GetLayoutCenterSketchPoint()
+        If swPt Is Nothing Then
+            DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: layout centre point not found"
+            Exit Function
+        End If
+        If Not InsertSingleRefAxisFrontPlaneAndSketchPoint(swPt) Then
+            DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: could not create ref axis at layout centre"
+            Exit Function
+        End If
     End If
 
-    If CommitRefAxisAfterInsert(axisCountBefore, BuildGearRefAxisName()) Then
+    If CommitRefAxisAfterInsert(axisCountBefore, axisName) Then
         CreateGearRefAxisFromLayoutSketchPoint = True
-        DebugPrint "CreateGearRefAxisFromLayoutSketchPoint OK: " & gAxisName & " (Front Plane + layout centre)"
+        DebugPrint "CreateGearRefAxisFromLayoutSketchPoint OK: " & gAxisName & " (count=" & CountRefAxisFeatures() & ")"
     Else
-        DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: ref axis feature not found after insert"
+        DeleteAllRefAxisFeaturesExcept
+        DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: ref axis not committed (count=" & CountRefAxisFeatures() & ")"
     End If
 End Function
 
@@ -1372,7 +1448,7 @@ Private Function FeatureIsRefAxis(ByVal ft As SldWorks.Feature) As Boolean
     FeatureIsRefAxis = False
     If ft Is Nothing Then Exit Function
     tn = ft.GetTypeName2
-    FeatureIsRefAxis = (tn = "RefAxis") Or (tn = "Axis") Or (InStr(1, tn, "Axis", vbTextCompare) > 0)
+    FeatureIsRefAxis = (tn = "RefAxis") Or (tn = "Axis")
     On Error GoTo 0
 End Function
 
@@ -1406,7 +1482,10 @@ Private Function CommitRefAxisAfterInsert(ByVal axisCountBefore As Long, Optiona
     ClearSWSelection
     RebuildSWPart
     axisCountAfter = CountRefAxisFeatures()
-    If axisCountAfter <= axisCountBefore Then Exit Function
+    If axisCountAfter <> axisCountBefore + 1 Then
+        DebugPrint "CommitRefAxisAfterInsert: expected 1 new axis, before=" & axisCountBefore & " after=" & axisCountAfter
+        Exit Function
+    End If
     Set swGearAxisFeat = FindLastRefAxisFeature()
     If swGearAxisFeat Is Nothing Then Exit Function
     If axisNameOverride <> "" Then
@@ -1426,7 +1505,7 @@ Public Function CreateGearRefAxisFromLayoutCenter() As Boolean
     CreateGearRefAxisFromLayoutCenter = False
     axisCountBefore = CountRefAxisFeatures()
 
-    If Not InsertGearRefAxisAtLayoutCenterOnFrontPlane() Then
+    If Not InsertSingleRefAxisFrontPlaneAndSketchPoint(GetLayoutCenterSketchPoint()) Then
         DebugPrint "CreateGearRefAxisFromLayoutCenter: InsertAxis2 failed at (" & _
             Format(gSketchOffsetXM * MM_PER_M, "0.###") & ", " & Format(gSketchOffsetYM * MM_PER_M, "0.###") & ") mm"
         Exit Function
@@ -1453,27 +1532,21 @@ Private Function CreateGearAxisFromOriginAndFrontPlane() As Boolean
     End If
 
     axisCountBefore = CountRefAxisFeatures()
-    ExitActiveSketchIfAny
-    ClearSWSelection
-
-    On Error Resume Next
-    boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0#, 0#, 0#, False, 0, Nothing, 0)
-    If boolstatus Then SelectPlaneFeature swFrontPlaneFeat, True
-    If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
-
-    If Not boolstatus Then
-        ClearSWSelection
-        SelectPlaneFeature swFrontPlaneFeat, False
-        boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0#, 0#, 0#, True, 0, Nothing, 0)
-        If boolstatus Then boolstatus = swDoc.InsertAxis2(True)
+    If GearTrainRole = GEAR_ROLE_DRIVING And Abs(gSketchOffsetXM) < 0.00001 And Abs(gSketchOffsetYM) < 0.00001 Then
+        If Not InsertSingleRefAxisFrontPlaneAndOrigin() Then
+            DebugPrint "CreateGearAxisFromOriginAndFrontPlane: InsertAxis2 failed"
+            Exit Function
+        End If
+    ElseIf Not InsertSingleRefAxisFrontPlaneAndSketchPoint(GetLayoutCenterSketchPoint()) Then
+        DebugPrint "CreateGearAxisFromOriginAndFrontPlane: InsertAxis2 failed"
+        Exit Function
     End If
-    On Error GoTo 0
 
     If CommitRefAxisAfterInsert(axisCountBefore) Then
         CreateGearAxisFromOriginAndFrontPlane = True
-        DebugPrint "CreateGearAxisFromOriginAndFrontPlane OK: " & gAxisName & " (Origin + Front Plane)"
+        DebugPrint "CreateGearAxisFromOriginAndFrontPlane OK: " & gAxisName & " (layout centre + Front Plane)"
     Else
-        DebugPrint "CreateGearAxisFromOriginAndFrontPlane: InsertAxis2 failed"
+        DebugPrint "CreateGearAxisFromOriginAndFrontPlane: ref axis not committed"
     End If
 End Function
 
@@ -1565,7 +1638,7 @@ Private Function CreateGearAxisFromLayoutPointAndTopPlane() As Boolean
 
     CreateGearAxisFromLayoutPointAndTopPlane = False
     axisCountBefore = CountRefAxisFeatures()
-    If Not InsertGearRefAxisAtLayoutCenterOnFrontPlane() Then
+    If Not InsertSingleRefAxisFrontPlaneAndSketchPoint(GetLayoutCenterSketchPoint()) Then
         DebugPrint "CreateGearAxisFromLayoutPointAndTopPlane: InsertAxis2 failed at layout centre"
         Exit Function
     End If
@@ -2419,7 +2492,8 @@ Private Sub LinkRevolveAxisLayoutEquations()
     Dim qRimW As String
     Dim qWidth As String
 
-    skName = gRevolveSketchFeatName
+    skName = gBlankSketchFeatName
+    If skName = "" Then skName = gRevolveSketchFeatName
     If skName = "" Then Exit Sub
 
     qRimW = EqQuotedName(GearGlobalVarName("RimWidth"))
