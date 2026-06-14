@@ -48,6 +48,8 @@ Private Sub LogRevolveSelectionDetails()
     Dim selCount As Long
     Dim selType As Long
     Dim selMark As Long
+    Dim selObj As Object
+    Dim selFeat As SldWorks.Feature
 
     On Error Resume Next
     selCount = swSelMgr.GetSelectedObjectCount2(-1)
@@ -55,90 +57,94 @@ Private Sub LogRevolveSelectionDetails()
     For i = 1 To selCount
         selType = swSelMgr.GetSelectedObjectType3(i, -1)
         selMark = swSelMgr.GetSelectedObjectMark(i)
-        DebugPrint "  sel(" & i & ") type=" & selType & " mark=" & selMark
+        Set selObj = swSelMgr.GetSelectedObject6(i, -1)
+        If Not selObj Is Nothing Then
+            If TypeOf selObj Is SldWorks.Feature Then
+                Set selFeat = selObj
+                DebugPrint "  sel(" & i & ") feat=" & selFeat.Name & " type=" & selType & " mark=" & selMark
+            Else
+                DebugPrint "  sel(" & i & ") type=" & selType & " mark=" & selMark
+            End If
+        End If
     Next i
     On Error GoTo 0
 End Sub
 
-Private Function SelectRevolveProfileSketch(ByVal swProfileSketchFeat As SldWorks.Feature) As Boolean
-    Dim profileName As String
-    Dim docTitle As String
-    Dim sd As SldWorks.SelectData
+' Clear all, then Feature.Select2: profile replace (mark 0), ref axis append (mark 16).
+Private Function ResolveRevolveAxisFeature() As SldWorks.Feature
+    Dim axisName As String
 
-    SelectRevolveProfileSketch = False
-    If swProfileSketchFeat Is Nothing Then Exit Function
-    profileName = swProfileSketchFeat.Name
-    docTitle = swDoc.GetTitle
+    Set ResolveRevolveAxisFeature = Nothing
+    axisName = BuildGearRefAxisName()
 
-    ClearSWSelection
-    On Error Resume Next
-
-    Set sd = swSelMgr.CreateSelectData
-    If Not sd Is Nothing Then
-        sd.Mark = 0
-        If swProfileSketchFeat.Select4(False, sd) Then
-            SelectRevolveProfileSketch = True
-            Exit Function
-        End If
+    If Not swGearAxisFeat Is Nothing Then
+        Set ResolveRevolveAxisFeature = swGearAxisFeat
+    ElseIf axisName <> "" Then
+        Set ResolveRevolveAxisFeature = FindRefAxisFeatureByName(axisName)
     End If
-
-    SelectRevolveProfileSketch = swModelDocExt.SelectByID2(profileName, "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
-    If Not SelectRevolveProfileSketch And docTitle <> "" Then
-        SelectRevolveProfileSketch = swModelDocExt.SelectByID2(profileName & "@" & docTitle, "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+    If ResolveRevolveAxisFeature Is Nothing Then
+        Set ResolveRevolveAxisFeature = FindLastRefAxisFeature()
     End If
-    On Error GoTo 0
+    If Not ResolveRevolveAxisFeature Is Nothing Then
+        Set swGearAxisFeat = ResolveRevolveAxisFeature
+        gAxisName = ResolveRevolveAxisFeature.Name
+    End If
 End Function
 
-Private Function SelectRevolveRefAxis(ByVal axisMark As Long) As Boolean
-    Dim axisName As String
-    Dim docTitle As String
-    Dim sd As SldWorks.SelectData
+Private Function RevolveSelectionHasFeature(ByVal featName As String) As Boolean
+    Dim i As Long
+    Dim selObj As Object
+    Dim selFeat As SldWorks.Feature
 
-    SelectRevolveRefAxis = False
-    axisName = gAxisName
-    If axisName = "" Then axisName = BuildGearRefAxisName()
-    docTitle = swDoc.GetTitle
-
+    RevolveSelectionHasFeature = False
     On Error Resume Next
-    SelectRevolveRefAxis = swModelDocExt.SelectByID2(axisName, "REFAXIS", 0, 0, 0, True, axisMark, Nothing, 0)
-    If Not SelectRevolveRefAxis Then SelectRevolveRefAxis = swModelDocExt.SelectByID2(axisName, "AXIS", 0, 0, 0, True, axisMark, Nothing, 0)
-    If Not SelectRevolveRefAxis And docTitle <> "" Then
-        SelectRevolveRefAxis = swModelDocExt.SelectByID2(axisName & "@" & docTitle, "REFAXIS", 0, 0, 0, True, axisMark, Nothing, 0)
-        If Not SelectRevolveRefAxis Then SelectRevolveRefAxis = swModelDocExt.SelectByID2(axisName & "@" & docTitle, "AXIS", 0, 0, 0, True, axisMark, Nothing, 0)
-    End If
-    If Not SelectRevolveRefAxis And Not swGearAxisFeat Is Nothing Then
-        Set sd = swSelMgr.CreateSelectData
-        If Not sd Is Nothing Then
-            sd.Mark = axisMark
-            SelectRevolveRefAxis = swGearAxisFeat.Select4(True, sd)
+    For i = 1 To swSelMgr.GetSelectedObjectCount2(-1)
+        Set selObj = swSelMgr.GetSelectedObject6(i, -1)
+        If Not selObj Is Nothing Then
+            If TypeOf selObj Is SldWorks.Feature Then
+                Set selFeat = selObj
+                If StrComp(selFeat.Name, featName, vbTextCompare) = 0 Then
+                    RevolveSelectionHasFeature = True
+                    Exit Function
+                End If
+            End If
         End If
-    End If
+    Next i
     On Error GoTo 0
 End Function
 
 Private Function SelectRevolveProfileAndRefAxis(ByVal swProfileSketchFeat As SldWorks.Feature) As Boolean
-    Dim profileName As String
-    Dim profileOk As Boolean
-    Dim axisOk As Boolean
+    Dim swAxisFeat As SldWorks.Feature
     Dim selCount As Long
 
     SelectRevolveProfileAndRefAxis = False
     If swProfileSketchFeat Is Nothing Then Exit Function
-    profileName = swProfileSketchFeat.Name
 
+    Set swAxisFeat = ResolveRevolveAxisFeature()
+    If swAxisFeat Is Nothing Then
+        DebugPrint "SelectRevolveProfileAndRefAxis: ref axis feature not found"
+        Exit Function
+    End If
+
+    ExitActiveSketchIfAny
     ClearSWSelection
-    swDoc.ShowNamedView2 "*Trimetric", 8
-    swDoc.ViewZoomtofit2
-    swDoc.GraphicsRedraw2
 
-    profileOk = SelectRevolveProfileSketch(swProfileSketchFeat)
-    If profileOk Then axisOk = SelectRevolveRefAxis(16)
-    If profileOk And Not axisOk Then axisOk = SelectRevolveRefAxis(4)
+    On Error Resume Next
+    swProfileSketchFeat.Select2 False, 0
+    swAxisFeat.Select2 True, 16
+    On Error GoTo 0
 
     selCount = swSelMgr.GetSelectedObjectCount2(-1)
-    SelectRevolveProfileAndRefAxis = profileOk And axisOk And selCount >= 2
-    DebugPrint "SelectRevolveProfileAndRefAxis: profile=" & profileName & " refAxis=" & gAxisName & _
-        " profileOk=" & profileOk & " axisOk=" & axisOk & " selCount=" & selCount
+    ' Do not trust Select2 return values — verify selection set by name/count only.
+    SelectRevolveProfileAndRefAxis = (selCount = 2) And _
+        RevolveSelectionHasFeature(swProfileSketchFeat.Name) And _
+        RevolveSelectionHasFeature(swAxisFeat.Name)
+
+    DebugPrint "SelectRevolveProfileAndRefAxis: profile=" & swProfileSketchFeat.Name & _
+        " refAxis=" & swAxisFeat.Name & " selCount=" & selCount & " ok=" & SelectRevolveProfileAndRefAxis
+    If Not SelectRevolveProfileAndRefAxis Then
+        DebugPrint "SelectRevolveProfileAndRefAxis FAIL: expected " & swProfileSketchFeat.Name & " + " & swAxisFeat.Name
+    End If
     LogRevolveSelectionDetails
 End Function
 
@@ -181,8 +187,8 @@ Private Function CreateRevolveBossFromSelection(ByRef methodUsed As String) As S
     Err.Clear
 
     selCount = swSelMgr.GetSelectedObjectCount2(-1)
-    If selCount < 2 Then
-        NoteGearBuildError "Revolve boss failed: fewer than 2 selected objects"
+    If selCount <> 2 Then
+        NoteGearBuildError "Revolve boss failed: expected 2 selected objects (profile + axis), got " & selCount
         DebugPrint "CreateRevolveBossFromSelection: selCount=" & selCount
         Exit Function
     End If
@@ -296,8 +302,17 @@ Public Function CreateRevolveBlank() As Boolean
         GoTo BlankFail
     End If
 
+    If swGearAxisFeat Is Nothing Then
+        Set swGearAxisFeat = ResolveRevolveAxisFeature()
+    End If
+    If swGearAxisFeat Is Nothing Then
+        NoteGearBuildError "CreateRevolveBlank: could not resolve ref axis feature"
+        GoTo BlankFail
+    End If
+
     If Not CreateRevolveProfileSketch(zBase, hubW, rimW, shaftR, hubR, odR) Then GoTo BlankFail
 
+    ClearSWSelection
     If Not SelectRevolveProfileAndRefAxis(swRevolveProfileSketchFeat) Then
         NoteGearBuildError "CreateRevolveBlank: could not select profile sketch and ref axis"
         DebugPrint gLastGearBuildError

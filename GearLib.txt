@@ -136,7 +136,22 @@ Public Sub GearBuildStepFail(Optional ByVal detail As String = "")
 End Sub
 
 Public Sub ClearSWSelection()
+    Dim i As Long
+    Dim n As Long
+    Dim selObj As Object
+
+    On Error Resume Next
+    If swDoc Is Nothing Then Exit Sub
+    Set swSelMgr = swDoc.SelectionManager
+
     swDoc.ClearSelection2 True
+    n = swSelMgr.GetSelectedObjectCount2(-1)
+    For i = n To 1 Step -1
+        Set selObj = swSelMgr.GetSelectedObject6(i, -1)
+        If Not selObj Is Nothing Then selObj.Select2 False, -1
+    Next i
+    swDoc.ClearSelection2 True
+    On Error GoTo 0
 End Sub
 
 Public Sub RebuildSWPart()
