@@ -1,15 +1,35 @@
 Option Explicit
 
-' FEATURE: Tooth — gap sketch (straight flanks) + blind cut extrude through rim.
+' FEATURE: Tooth — gap sketch (involute-style construction) + blind cut extrude through rim.
 ' Paste into VBA module: Tooth
 '
-' Depends on Involute1: GearGeom, Pi, swToothGapSketchFeat, swToothCutFeat, swFeatMgr, sw2DSketch
+' Depends on Involute1: GearGeom, Pi, swToothGapSketchFeat, swToothCutFeat, swFeatMgr, sw2DSketch,
+'   gLayoutCenterPointName, swLayoutSketchFeat
 ' Depends on GearLib: constants, sketch helpers, state, cut scope helpers
+'
+' Gap sketch construction (matches manual tooth layout):
+'   1. Reuse GearN_Layout circles (OD, pitch, root) via SketchUseEdge — no duplicate diameters
+'   2. Three construction radials from centre to OD: vertical, half-pitch, full-pitch (arc-length driven)
+'   3. Pitch point at pitch circle ∩ half-pitch radial
+'   4. Pressure-angle construction line from pitch point to OD
+'   5. Flank arc tangent to pressure line at OD, ending on base circle (R = rb * tan(alpha))
+'   6. Close gap: full-pitch radial, addendum arc, root arc, root fillet
 
 Private mGapSketchFeatName As String
 Private mGapVertCenter As SldWorks.SketchSegment
+Private mGapLineHalf As SldWorks.SketchSegment
+Private mGapLineFull As SldWorks.SketchSegment
 Private mGapOdCircle As SldWorks.SketchSegment
+Private mGapPitchCircle As SldWorks.SketchSegment
 Private mGapRootCircle As SldWorks.SketchSegment
+Private mGapBaseCircle As SldWorks.SketchSegment
+Private mGapCenterPt As SldWorks.SketchPoint
+Private mGapPitchPt As SldWorks.SketchPoint
+Private mGapPALine As SldWorks.SketchSegment
+Private mGapFlankArc As SldWorks.SketchSegment
+Private mGapRightRad As SldWorks.SketchSegment
+Private mGapTopArc As SldWorks.SketchSegment
+Private mGapRootArc As SldWorks.SketchSegment
 
 ' ---------------------------------------------------------------------------
 ' Gap sketch
@@ -18,8 +38,19 @@ Public Sub Tooth_ResetBuildRefs()
     Set swToothGapSketchFeat = Nothing
     Set swToothCutFeat = Nothing
     Set mGapVertCenter = Nothing
+    Set mGapLineHalf = Nothing
+    Set mGapLineFull = Nothing
     Set mGapOdCircle = Nothing
+    Set mGapPitchCircle = Nothing
     Set mGapRootCircle = Nothing
+    Set mGapBaseCircle = Nothing
+    Set mGapCenterPt = Nothing
+    Set mGapPitchPt = Nothing
+    Set mGapPALine = Nothing
+    Set mGapFlankArc = Nothing
+    Set mGapRightRad = Nothing
+    Set mGapTopArc = Nothing
+    Set mGapRootArc = Nothing
     mGapSketchFeatName = ""
 End Sub
 
@@ -37,6 +68,171 @@ Private Function ArcMidAngleShort(ByVal angStart As Double, ByVal angEnd As Doub
         span = span + 2# * Pi
     Loop
     ArcMidAngleShort = angStart + span / 2#
+End Function
+
+Private Function CountActiveSketchSegments() As Long
+    Dim swSk As SldWorks.Sketch
+    Dim vSegs As Variant
+    On Error Resume Next
+    CountActiveSketchSegments = 0
+    Set swSk = swSketchManager.ActiveSketch
+    If swSk Is Nothing Then Exit Function
+    vSegs = swSk.GetSketchSegments
+    If IsArray(vSegs) Then CountActiveSketchSegments = UBound(vSegs) - LBound(vSegs) + 1
+    On Error GoTo 0
+End Function
+
+Private Function CountActiveSketchPoints() As Long
+    Dim swSk As SldWorks.Sketch
+    Dim vPts As Variant
+    On Error Resume Next
+    CountActiveSketchPoints = 0
+    Set swSk = swSketchManager.ActiveSketch
+    If swSk Is Nothing Then Exit Function
+    vPts = swSk.GetSketchPoints2
+    If IsArray(vPts) Then CountActiveSketchPoints = UBound(vPts) - LBound(vPts) + 1
+    On Error GoTo 0
+End Function
+
+Private Function TryConvertLayoutExternalSegment(ByVal segId As String) As SldWorks.SketchSegment
+    Dim nBefore As Long
+    Dim swSk As SldWorks.Sketch
+    Dim vSegs As Variant
+    Dim i As Long
+    Dim swSeg As SldWorks.SketchSegment
+
+    Set TryConvertLayoutExternalSegment = Nothing
+    On Error Resume Next
+    Set swSk = swSketchManager.ActiveSketch
+    If swSk Is Nothing Then Exit Function
+    nBefore = CountActiveSketchSegments()
+    ClearSWSelection
+    If Not swModelDocExt.SelectByID2(segId, "EXTSKETCHSEGMENT", 0#, 0#, 0#, False, 0, Nothing, 0) Then
+        DebugPrint "TryConvertLayoutExternalSegment: select failed " & segId
+        Exit Function
+    End If
+    swSketchManager.SketchUseEdge3 False, False
+    vSegs = swSk.GetSketchSegments
+    If IsArray(vSegs) Then
+        For i = LBound(vSegs) To UBound(vSegs)
+            If i >= LBound(vSegs) + nBefore Or nBefore = 0 Then
+                Set swSeg = vSegs(i)
+                If Not swSeg Is Nothing Then
+                    swSeg.ConstructionGeometry = True
+                    Set TryConvertLayoutExternalSegment = swSeg
+                    Exit Function
+                End If
+            End If
+        Next i
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function TryConvertLayoutCenterPoint() As SldWorks.SketchPoint
+    Dim skName As String
+    Dim ptId As String
+    Dim nBefore As Long
+    Dim swSk As SldWorks.Sketch
+    Dim vPts As Variant
+    Dim i As Long
+    Dim swPt As SldWorks.SketchPoint
+
+    Set TryConvertLayoutCenterPoint = Nothing
+    skName = GetLayoutSketchFeatName()
+    If skName = "" Then Exit Function
+    If gLayoutCenterPointName = "" Then gLayoutCenterPointName = BuildGearLayoutCenterPointName()
+    ptId = gLayoutCenterPointName & "@" & skName
+
+    On Error Resume Next
+    Set swSk = swSketchManager.ActiveSketch
+    If swSk Is Nothing Then Exit Function
+    nBefore = CountActiveSketchPoints()
+    ClearSWSelection
+    If Not swModelDocExt.SelectByID2(ptId, "EXTSKETCHPOINT", 0#, 0#, 0#, False, 0, Nothing, 0) Then
+        DebugPrint "TryConvertLayoutCenterPoint: select failed " & ptId
+        Exit Function
+    End If
+    swSketchManager.SketchUseEdge3 False, False
+    vPts = swSk.GetSketchPoints2
+    If IsArray(vPts) Then
+        For i = LBound(vPts) To UBound(vPts)
+            If i >= LBound(vPts) + nBefore Or nBefore = 0 Then
+                Set swPt = vPts(i)
+                If Not swPt Is Nothing Then
+                    Set TryConvertLayoutCenterPoint = swPt
+                    Exit Function
+                End If
+            End If
+        Next i
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function ConvertLayoutReferenceCircles() As Boolean
+    Dim skName As String
+
+    ConvertLayoutReferenceCircles = False
+    skName = GetLayoutSketchFeatName()
+    If skName = "" Then
+        NoteGearBuildError "ConvertLayoutReferenceCircles: layout sketch name missing"
+        Exit Function
+    End If
+
+    Set mGapCenterPt = TryConvertLayoutCenterPoint()
+    Set mGapOdCircle = TryConvertLayoutExternalSegment("Arc1@" & skName)
+    Set mGapPitchCircle = TryConvertLayoutExternalSegment("Arc2@" & skName)
+    Set mGapRootCircle = TryConvertLayoutExternalSegment("Arc3@" & skName)
+
+    If mGapCenterPt Is Nothing Or mGapOdCircle Is Nothing Or mGapPitchCircle Is Nothing Or mGapRootCircle Is Nothing Then
+        NoteGearBuildError "ConvertLayoutReferenceCircles: could not convert layout centre / circles"
+        Exit Function
+    End If
+    DebugPrint "ConvertLayoutReferenceCircles OK from " & skName
+    ConvertLayoutReferenceCircles = True
+End Function
+
+Private Function CreateBaseReferenceCircle(ByVal cx As Double, ByVal cy As Double) As SldWorks.SketchSegment
+    Dim rb As Double
+    Set CreateBaseReferenceCircle = Nothing
+    rb = GearGeom.BaseRadiusM
+    Set CreateBaseReferenceCircle = swSketchManager.CreateCircle(cx, cy, 0#, cx + rb, cy, 0#)
+    If CreateBaseReferenceCircle Is Nothing Then Exit Function
+    CreateBaseReferenceCircle.ConstructionGeometry = True
+    ConstrainSketchPointConcentricToCircle mGapCenterPt, CreateBaseReferenceCircle
+End Function
+
+Private Sub ConstrainSketchPointCoincidentToCircle(ByVal swPt As SldWorks.SketchPoint, ByVal swCircle As SldWorks.SketchSegment)
+    On Error Resume Next
+    If swPt Is Nothing Or swCircle Is Nothing Then Exit Sub
+    ClearSWSelection
+    swPt.Select4 False, Nothing
+    swCircle.Select4 True, Nothing
+    swDoc.SketchAddConstraints "sgCOINCIDENT"
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+Private Function CreateRadialStubToOd(ByVal cx As Double, ByVal cy As Double, ByVal construction As Boolean) As SldWorks.SketchSegment
+    Dim ra As Double
+    Dim swLine As SldWorks.SketchSegment
+    ra = GearGeom.AddendumRadiusM
+    Set swLine = swSketchManager.CreateLine(cx, cy, 0#, cx + ra * 0.15, cy + ra * 0.98, 0#)
+    If swLine Is Nothing Then Exit Function
+    swLine.ConstructionGeometry = construction
+    ConstrainSketchPointCoincidentToSegment mGapCenterPt, swLine
+    ConstrainSketchSegmentsCoincident swLine, mGapOdCircle
+    Set CreateRadialStubToOd = swLine
+End Function
+
+Private Function GetLineEndCoords(ByVal swLine As SldWorks.SketchSegment, ByRef xOut As Double, ByRef yOut As Double) As Boolean
+    Dim swSkLine As SldWorks.SketchLine
+    On Error Resume Next
+    GetLineEndCoords = False
+    If swLine Is Nothing Then Exit Function
+    Set swSkLine = swLine
+    swSkLine.GetEndPoint2 xOut, yOut, 0#
+    GetLineEndCoords = True
+    On Error GoTo 0
 End Function
 
 Private Sub CreateGapArcDimension(ByVal swArc As SketchSegment, ByVal dimName As String, ByVal valueMM As Double, _
@@ -58,13 +254,33 @@ Private Sub CreateGapArcDimension(ByVal swArc As SketchSegment, ByVal dimName As
     On Error GoTo 0
 End Sub
 
-Private Sub CreateGapLinearDimension(ByVal swSeg As SketchSegment, ByVal dimName As String, ByVal valueMM As Double, _
+Private Sub CreateGapAngleDimension(ByVal swLineA As SketchSegment, ByVal swLineB As SketchSegment, _
+    ByVal dimName As String, ByVal valueDeg As Double, ByVal textXM As Double, ByVal textYM As Double)
+    Dim swDispDim As Object
+    Dim swDim As SldWorks.Dimension
+    On Error Resume Next
+    ClearSWSelection
+    swLineA.Select4 False, Nothing
+    swLineB.Select4 True, Nothing
+    Set swDispDim = swModelDocExt.AddDimension(textXM, textYM, 0#)
+    If Not swDispDim Is Nothing Then
+        Set swDim = swDispDim.GetDimension2(0)
+        If Not swDim Is Nothing Then
+            swDim.SystemValue = valueDeg * Pi / 180#
+            swDim.Name = dimName
+        End If
+    End If
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+Private Sub CreateGapRadiusDimension(ByVal swArc As SketchSegment, ByVal dimName As String, ByVal valueMM As Double, _
     ByVal textXM As Double, ByVal textYM As Double)
     Dim swDispDim As Object
     Dim swDim As SldWorks.Dimension
     On Error Resume Next
     ClearSWSelection
-    swSeg.Select4 False, Nothing
+    swArc.Select4 False, Nothing
     Set swDispDim = swModelDocExt.AddDimension(textXM, textYM, 0#)
     If Not swDispDim Is Nothing Then
         Set swDim = swDispDim.GetDimension2(0)
@@ -77,84 +293,209 @@ Private Sub CreateGapLinearDimension(ByVal swSeg As SketchSegment, ByVal dimName
     On Error GoTo 0
 End Sub
 
+Private Function CreatePitchArcLengthDimensionBetweenRadials(ByVal swCircle As SketchSegment, _
+    ByVal swRadialA As SketchSegment, ByVal swRadialB As SketchSegment, _
+    ByVal dimName As String, ByVal arcLenMM As Double, ByVal textXM As Double, ByVal textYM As Double) As Boolean
+    Dim swDispDim As Object
+    Dim swDim As SldWorks.Dimension
+    On Error Resume Next
+    CreatePitchArcLengthDimensionBetweenRadials = False
+    ClearSWSelection
+    swCircle.Select4 False, Nothing
+    swRadialA.Select4 True, Nothing
+    swRadialB.Select4 True, Nothing
+    Set swDispDim = swModelDocExt.AddDimension(textXM, textYM, 0#)
+    If swDispDim Is Nothing Then
+        swRadialA.Select4 False, Nothing
+        swRadialB.Select4 True, Nothing
+        Set swDispDim = swModelDocExt.AddDimension(textXM, textYM, 0#)
+    End If
+    If Not swDispDim Is Nothing Then
+        Set swDim = swDispDim.GetDimension2(0)
+        If Not swDim Is Nothing Then
+            swDim.SystemValue = arcLenMM / MM_PER_M
+            swDim.Name = dimName
+            CreatePitchArcLengthDimensionBetweenRadials = True
+        End If
+    End If
+    ClearSWSelection
+    On Error GoTo 0
+End Function
+
+Private Function CreateInvoluteFlankArc(ByVal swPALine As SldWorks.SketchSegment, ByVal angHalf As Double, _
+    ByVal cx As Double, ByVal cy As Double) As SldWorks.SketchSegment
+    Dim rb As Double
+    Dim flankRMM As Double
+    Dim tipX As Double
+    Dim tipY As Double
+    Dim baseX As Double
+    Dim baseY As Double
+    Dim angBase As Double
+    Dim swArc As SldWorks.SketchSegment
+
+    Set CreateInvoluteFlankArc = Nothing
+    rb = GearGeom.BaseRadiusM
+    flankRMM = GearGeom.BaseRadiusMM * Tan(GearGeom.PressureAngleDeg * Pi / 180#)
+    If Not GetLineEndCoords(swPALine, tipX, tipY) Then Exit Function
+
+    angBase = Pi / 2# - angHalf + GearGeom.PressureAngleDeg * Pi / 180#
+    baseX = cx + rb * Cos(angBase)
+    baseY = cy + rb * Sin(angBase)
+
+    ClearSWSelection
+    swPALine.Select4 False, Nothing
+    On Error Resume Next
+    Set swArc = swSketchManager.CreateTangentArc(tipX, tipY, 0#, baseX, baseY, 0#, 1)
+    On Error GoTo 0
+    If swArc Is Nothing Then
+        Set swArc = swSketchManager.Create3PointArc(tipX, tipY, 0#, (tipX + baseX) / 2#, (tipY + baseY) / 2#, 0#, baseX, baseY, 0#)
+    End If
+    If swArc Is Nothing Then Exit Function
+
+    ConstrainTangentSketchSegments swArc, swPALine
+    ConstrainSketchSegmentsCoincident swArc, mGapBaseCircle
+    CreateGapRadiusDimension swArc, GEAR_DIM_GAP_FLANK_ARC_RADIUS, flankRMM, (tipX + baseX) / 2#, (tipY + baseY) / 2#
+    Set CreateInvoluteFlankArc = swArc
+End Function
+
+Private Function CreateRootFilletArc(ByVal cx As Double, ByVal cy As Double, ByVal angHalf As Double) As SldWorks.SketchSegment
+    Dim rr As Double
+    Dim filletMM As Double
+    Dim xRoot As Double
+    Dim yRoot As Double
+    Dim xMid As Double
+    Dim yMid As Double
+    Dim swArc As SldWorks.SketchSegment
+
+    Set CreateRootFilletArc = Nothing
+    rr = GearGeom.DedendumRadiusM
+    filletMM = GearGeom.GapRootFilletMM
+    xRoot = cx + rr * Cos(Pi / 2# - angHalf)
+    yRoot = cy + rr * Sin(Pi / 2# - angHalf)
+    xMid = cx + (rr + filletMM / MM_PER_M) * Cos(Pi / 2# - angHalf + 0.04)
+    yMid = cy + (rr + filletMM / MM_PER_M) * Sin(Pi / 2# - angHalf + 0.04)
+    Set swArc = swSketchManager.Create3PointArc(xRoot, yRoot, 0#, xMid, yMid, 0#, cx + rr * Cos(Pi / 2# - angHalf + 0.08), cy + rr * Sin(Pi / 2# - angHalf + 0.08), 0#)
+    If swArc Is Nothing Then Exit Function
+    ConstrainSketchSegmentsCoradial swArc, mGapRootCircle
+    CreateGapRadiusDimension swArc, GEAR_DIM_GAP_ROOT_FILLET, filletMM, xMid, yMid
+    Set CreateRootFilletArc = swArc
+End Function
+
 Public Function CreateToothGapSketch() As Boolean
     On Error GoTo SketchFail
 
-    Dim ra As Double
-    Dim rr As Double
-    Dim angHalf As Double
-    Dim xTipR As Double
-    Dim yTipR As Double
-    Dim xTipL As Double
-    Dim yTipL As Double
-    Dim xRootR As Double
-    Dim yRootR As Double
-    Dim xRootL As Double
-    Dim yRootL As Double
-    Dim angTipR As Double
-    Dim angTipL As Double
-    Dim angMid As Double
-    Dim swFlankR As SketchSegment
-    Dim swFlankL As SketchSegment
-    Dim swTopArc As SketchSegment
-    Dim swRootArc As SketchSegment
     Dim cx As Double
     Dim cy As Double
+    Dim angHalf As Double
+    Dim angFull As Double
+    Dim angHalfRad As Double
+    Dim angFullRad As Double
+    Dim angTipHalf As Double
+    Dim angTipFull As Double
+    Dim xTipHalf As Double
+    Dim yTipHalf As Double
+    Dim xTipFull As Double
+    Dim yTipFull As Double
+    Dim xRootHalf As Double
+    Dim yRootHalf As Double
+    Dim xRootFull As Double
+    Dim yRootFull As Double
+    Dim xPitch As Double
+    Dim yPitch As Double
+    Dim angMidTop As Double
+    Dim ra As Double
+    Dim rr As Double
+    Dim rp As Double
 
     CreateToothGapSketch = False
-    DebugPrint "CreateToothGapSketch: --- McMaster straight-flank ---"
+    DebugPrint "CreateToothGapSketch: --- layout-linked involute gap ---"
     cx = gSketchOffsetXM
     cy = gSketchOffsetYM
-
     ra = GearGeom.AddendumRadiusM
     rr = GearGeom.DedendumRadiusM
+    rp = GearGeom.PitchRadiusM
     angHalf = GearGeom.GapHalfArcLengthMM / GearGeom.AddendumRadiusMM
-
-    angTipR = Pi / 2# - angHalf
-    angTipL = Pi / 2# + angHalf
-    xTipR = cx + ra * Cos(angTipR)
-    yTipR = cy + ra * Sin(angTipR)
-    xTipL = cx + ra * Cos(angTipL)
-    yTipL = cy + ra * Sin(angTipL)
-    xRootR = cx + rr * Cos(angTipR)
-    yRootR = cy + rr * Sin(angTipR)
-    xRootL = cx + rr * Cos(angTipL)
-    yRootL = cy + rr * Sin(angTipL)
+    angFull = GearGeom.GapArcLengthMM / GearGeom.AddendumRadiusMM
+    angHalfRad = angHalf
+    angFullRad = angFull
+    angTipHalf = Pi / 2# - angHalfRad
+    angTipFull = Pi / 2# - angFullRad
 
     If Not BeginSketchOnFrontPlane() Then GoTo SketchFail
     DebugPrint "CreateToothGapSketch: front-plane sketch open"
     Set sw2DSketch = swSketchManager.ActiveSketch
 
-    Set mGapVertCenter = swSketchManager.CreateCenterLine(cx, cy, 0, cx, cy + ra * 1.05, 0)
+    If Not ConvertLayoutReferenceCircles() Then GoTo SketchFail
+    Set mGapBaseCircle = CreateBaseReferenceCircle(cx, cy)
+    If mGapBaseCircle Is Nothing Then GoTo SketchFail
+
+    ' Step 2 — three construction radials from centre to addendum (vertical + half/full pitch)
+    Set mGapVertCenter = swSketchManager.CreateCenterLine(cx, cy, 0#, cx, cy + ra * 1.05, 0#)
     If mGapVertCenter Is Nothing Then GoTo SketchFail
     mGapVertCenter.ConstructionGeometry = True
+    ConstrainSketchPointCoincidentToSegment mGapCenterPt, mGapVertCenter
+    ConstrainSketchSegmentVertical mGapVertCenter
 
-    Set mGapOdCircle = swSketchManager.CreateCircle(cx, cy, 0, cx + ra, cy, 0)
-    Set mGapRootCircle = swSketchManager.CreateCircle(cx, cy, 0, cx + rr, cy, 0)
-    If mGapOdCircle Is Nothing Or mGapRootCircle Is Nothing Then GoTo SketchFail
-    mGapOdCircle.ConstructionGeometry = True
-    mGapRootCircle.ConstructionGeometry = True
-    AddDiameterDimensionToCircle mGapOdCircle, GEAR_DIM_LAYOUT_OD, GearGeom.AddendumDiameterMM
-    AddDiameterDimensionToCircle mGapRootCircle, GEAR_DIM_LAYOUT_ROOT, GearGeom.DedendumDiameterMM
-    ConstrainSketchSegmentsConcentric mGapOdCircle, mGapRootCircle
+    Set mGapLineHalf = CreateRadialStubToOd(cx, cy, True)
+    Set mGapLineFull = CreateRadialStubToOd(cx, cy, True)
+    If mGapLineHalf Is Nothing Or mGapLineFull Is Nothing Then GoTo SketchFail
 
-    Set swFlankR = swSketchManager.CreateLine(xRootR, yRootR, 0, xTipR, yTipR, 0)
-    Set swFlankL = swSketchManager.CreateLine(xRootL, yRootL, 0, xTipL, yTipL, 0)
-    If swFlankR Is Nothing Or swFlankL Is Nothing Then GoTo SketchFail
-    DebugPrint "CreateToothGapSketch: flanks and arcs"
+    If Not CreatePitchArcLengthDimensionBetweenRadials(mGapOdCircle, mGapVertCenter, mGapLineHalf, _
+        GEAR_DIM_GAP_HALF_ARC, GearGeom.GapHalfArcLengthMM, cx + ra * 0.35 * Sin(angHalfRad / 2#), cy + ra * 0.35 * Cos(angHalfRad / 2#)) Then
+        DebugPrint "CreateToothGapSketch: WARN half-pitch arc dim placement failed"
+    End If
+    If Not CreatePitchArcLengthDimensionBetweenRadials(mGapOdCircle, mGapVertCenter, mGapLineFull, _
+        GEAR_DIM_GAP_ARC, GearGeom.GapArcLengthMM, cx + ra * 0.45 * Sin(angFullRad / 2#), cy + ra * 0.45 * Cos(angFullRad / 2#)) Then
+        DebugPrint "CreateToothGapSketch: WARN full-pitch arc dim placement failed"
+    End If
 
-    angMid = ArcMidAngleShort(angTipR, angTipL)
-    Set swTopArc = swSketchManager.Create3PointArc(xTipR, yTipR, 0, xTipL, yTipL, 0, cx + ra * Cos(angMid), cy + ra * Sin(angMid), 0)
-    Set swRootArc = swSketchManager.Create3PointArc(xRootL, yRootL, 0, xRootR, yRootR, 0, cx + rr * Cos(Pi / 2#), cy + rr * Sin(Pi / 2#), 0)
-    If swTopArc Is Nothing Or swRootArc Is Nothing Then GoTo SketchFail
+    ' Step 3 — pitch point on pitch circle ∩ half-pitch radial
+    xPitch = cx + rp * Cos(angTipHalf)
+    yPitch = cy + rp * Sin(angTipHalf)
+    Set mGapPitchPt = swSketchManager.CreatePoint(xPitch, yPitch, 0#)
+    If mGapPitchPt Is Nothing Then GoTo SketchFail
+    ConstrainSketchPointCoincidentToSegment mGapPitchPt, mGapLineHalf
+    ConstrainSketchPointCoincidentToCircle mGapPitchPt, mGapPitchCircle
 
-    ConstrainSketchSegmentsCoradial swTopArc, mGapOdCircle
-    ConstrainSketchSegmentsCoradial swRootArc, mGapRootCircle
+    ' Step 4 — pressure-angle construction line from pitch point to addendum
+    Set mGapPALine = swSketchManager.CreateLine(xPitch, yPitch, 0#, xPitch + ra * 0.08, yPitch + ra * 0.08, 0#)
+    If mGapPALine Is Nothing Then GoTo SketchFail
+    mGapPALine.ConstructionGeometry = True
+    ConstrainSketchPointCoincidentToSegment mGapPitchPt, mGapPALine
+    ConstrainSketchSegmentsCoincident mGapPALine, mGapOdCircle
+    CreateGapAngleDimension mGapLineHalf, mGapPALine, GEAR_DIM_GAP_FLANK_ANGLE, GearGeom.PressureAngleDeg, _
+        cx + rp * 0.55, cy + rp * 0.55
 
-    CreateGapArcDimension swTopArc, GEAR_DIM_GAP_ARC, GearGeom.GapArcLengthMM, cx + ra * 0.55 * Sin(angMid), cy + ra * 0.55 * Cos(angMid)
-    CreateGapArcDimension swTopArc, GEAR_DIM_GAP_HALF_ARC, GearGeom.GapHalfArcLengthMM, cx + ra * 0.45 * Sin(angTipR + angHalf / 2#), cy + ra * 0.45 * Cos(angTipR + angHalf / 2#)
-    CreateGapLinearDimension mGapVertCenter, GEAR_DIM_GAP_FLANK_ANGLE, GearGeom.PressureAngleDeg, cx + rr * 0.35, cy + rr * 0.15
-    CreateGapLinearDimension swRootArc, GEAR_DIM_GAP_ROOT_FILLET, GearGeom.GapRootFilletMM, cx + rr * 0.2, cy + rr * 0.95
+    ' Step 5 — flank arc tangent to pressure line at addendum, toward base circle
+    Set mGapFlankArc = CreateInvoluteFlankArc(mGapPALine, angHalfRad, cx, cy)
+    If mGapFlankArc Is Nothing Then GoTo SketchFail
+
+    ' Step 6 — close gap profile (right radial, top addendum arc, root arc, root fillet)
+    xTipHalf = cx + ra * Cos(angTipHalf)
+    yTipHalf = cy + ra * Sin(angTipHalf)
+    xTipFull = cx + ra * Cos(angTipFull)
+    yTipFull = cy + ra * Sin(angTipFull)
+    xRootHalf = cx + rr * Cos(angTipHalf)
+    yRootHalf = cy + rr * Sin(angTipHalf)
+    xRootFull = cx + rr * Cos(angTipFull)
+    yRootFull = cy + rr * Sin(angTipFull)
+
+    Set mGapRightRad = CreateRadialStubToOd(cx, cy, False)
+    If mGapRightRad Is Nothing Then GoTo SketchFail
+    ConstrainSketchSegmentColinearToSegment mGapRightRad, mGapLineFull
+
+    angMidTop = ArcMidAngleShort(angTipFull, angTipHalf)
+    Set mGapTopArc = swSketchManager.Create3PointArc(xTipFull, yTipFull, 0#, xTipHalf, yTipHalf, 0#, _
+        cx + ra * Cos(angMidTop), cy + ra * Sin(angMidTop), 0#)
+    If mGapTopArc Is Nothing Then GoTo SketchFail
+    ConstrainSketchSegmentsCoradial mGapTopArc, mGapOdCircle
+
+    Set mGapRootArc = swSketchManager.Create3PointArc(xRootHalf, yRootHalf, 0#, xRootFull, yRootFull, 0#, _
+        cx + rr * Cos(angMidTop), cy + rr * Sin(angMidTop), 0#)
+    If mGapRootArc Is Nothing Then GoTo SketchFail
+    ConstrainSketchSegmentsCoradial mGapRootArc, mGapRootCircle
+
+    CreateRootFilletArc cx, cy, angHalfRad
 
     swSketchManager.InsertSketch True
     Set swToothGapSketchFeat = FindLastSketchFeature()

@@ -57,6 +57,7 @@ Public Const GEAR_DIM_GAP_ARC As String = "InvoluteGear_GapArc"
 Public Const GEAR_DIM_GAP_HALF_ARC As String = "InvoluteGear_GapHalfArc"
 Public Const GEAR_DIM_GAP_ROOT_FILLET As String = "InvoluteGear_GapRootFillet"
 Public Const GEAR_DIM_GAP_FLANK_ANGLE As String = "InvoluteGear_GapFlankAngle"
+Public Const GEAR_DIM_GAP_FLANK_ARC_RADIUS As String = "InvoluteGear_GapFlankArcRadius"
 Public Const GEAR_DIM_FILLET As String = "InvoluteGear_Fillet"
 Public Const GEAR_MCM_ROOT_FILLET_RATIO As Double = 0.0955
 Public Const GEAR_MCM_FILLET_OD_RATIO As Double = 0.01
@@ -969,6 +970,38 @@ Public Sub ConstrainSketchSegmentColinearToSegment(ByVal swSeg As SldWorks.Sketc
     swAxisSeg.Select4 False, Nothing
     swSeg.Select4 True, Nothing
     swDoc.SketchAddConstraints "sgCOLINEAR"
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+Public Sub ConstrainSketchSegmentVertical(ByVal swSeg As SldWorks.SketchSegment)
+    On Error Resume Next
+    If swSeg Is Nothing Then Exit Sub
+    ClearSWSelection
+    swSeg.Select4 False, Nothing
+    swDoc.SketchAddConstraints "sgVERTICAL"
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+Public Sub ConstrainSketchPointCoincidentToSegment(ByVal swPt As SldWorks.SketchPoint, ByVal swSeg As SldWorks.SketchSegment)
+    On Error Resume Next
+    If swPt Is Nothing Or swSeg Is Nothing Then Exit Sub
+    ClearSWSelection
+    swPt.Select4 False, Nothing
+    swSeg.Select4 True, Nothing
+    swDoc.SketchAddConstraints "sgCOINCIDENT"
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
+
+Public Sub ConstrainSketchSegmentsCoincident(ByVal swSeg1 As SldWorks.SketchSegment, ByVal swSeg2 As SldWorks.SketchSegment)
+    On Error Resume Next
+    If swSeg1 Is Nothing Or swSeg2 Is Nothing Then Exit Sub
+    ClearSWSelection
+    swSeg1.Select4 False, Nothing
+    swSeg2.Select4 True, Nothing
+    swDoc.SketchAddConstraints "sgCOINCIDENT"
     ClearSWSelection
     On Error GoTo 0
 End Sub
@@ -2537,14 +2570,9 @@ Private Sub LinkMcMasterGapSketchEquations()
     AddOrUpdateDimensionEquation GEAR_DIM_GAP_HALF_ARC & "@" & skName, qGapArc & " / 2"
     AddOrUpdateDimensionEquation GEAR_DIM_GAP_ROOT_FILLET & "@" & skName, qRootFillet
     AddOrUpdateDimensionEquation GEAR_DIM_GAP_FLANK_ANGLE & "@" & skName, qPA
-
-    If GearGeom.IsInternal Then
-        LinkSketchDiameterEquation GEAR_DIM_LAYOUT_OD, skName, False
-        LinkSketchDiameterEquation GEAR_DIM_LAYOUT_ROOT, skName, True
-    Else
-        LinkSketchDiameterEquation GEAR_DIM_LAYOUT_OD, skName, True
-        LinkSketchDiameterEquation GEAR_DIM_LAYOUT_ROOT, skName, False
-    End If
+    AddOrUpdateDimensionEquation GEAR_DIM_GAP_FLANK_ARC_RADIUS & "@" & skName, _
+        EqQuotedName(GearGlobalVarName("BaseRadius")) & " * TAN(" & qPA & " * PI / 180)"
+    ' OD / pitch / root diameters are driven only by the layout sketch (converted edges in gap sketch)
 End Sub
 
 Private Sub LinkMcMasterFilletEquation()
