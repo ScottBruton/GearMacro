@@ -59,6 +59,16 @@ Public Const GEAR_DIM_GAP_ROOT_FILLET As String = "InvoluteGear_GapRootFillet"
 Public Const GEAR_DIM_GAP_FLANK_ANGLE As String = "InvoluteGear_GapFlankAngle"
 Public Const GEAR_DIM_GAP_FLANK_ARC_RADIUS As String = "InvoluteGear_GapFlankArcRadius"
 Public Const GEAR_DIM_FILLET As String = "InvoluteGear_Fillet"
+
+' ApplyCoincidentRelation — entity kind for each side (A = first pick, B = second pick append)
+Public Const COINC_SEL_SKETCH_POINT As Long = 1       ' obj = SketchPoint
+Public Const COINC_SEL_SKETCH_SEGMENT As Long = 2     ' obj = SketchSegment (whole segment)
+Public Const COINC_SEL_SKETCH_XY As Long = 3          ' x,y pick in active sketch (point or on-segment)
+Public Const COINC_SEL_ARC_ENDPOINT As Long = 4       ' obj = arc SketchSegment; epIndex 0=start 1=end
+Public Const COINC_SEL_EXT_SEGMENT As Long = 5        ' sketch + segBaseName + x,y on layout/external arc
+Public Const COINC_SEL_SEG_IN_SKETCH As Long = 6      ' segment by GetName inside sketchFeat feature
+Public Const COINC_SEL_LINE_ENDPOINT As Long = 7      ' obj = line SketchSegment; epIndex 0=start 1=end -> SketchPoint only
+
 Public Const GEAR_MCM_ROOT_FILLET_RATIO As Double = 0.0955
 Public Const GEAR_MCM_FILLET_OD_RATIO As Double = 0.01
 Public Const SW_SIMPLE_FILLET_CONST_RADIUS As Long = 0   ' swSimpleFilletType_e.swConstRadiusFillet
@@ -101,7 +111,7 @@ Public Function FormatSWFeatureError(ByVal swFeat As SldWorks.Feature, Optional 
     On Error Resume Next
     errCode = swFeat.GetErrorCode2(True)
     If errCode <> 0 Then
-        s = swFeat.Name & " feature error code=" & errCode
+        s = swFeat.name & " feature error code=" & errCode
         If context <> "" Then s = context & " — " & s
         FormatSWFeatureError = s
     ElseIf context <> "" Then
@@ -319,9 +329,9 @@ Private Function CountMacroGearsInPart() As Long
         Set swBody = vBodies(i)
         If IsMacroGearBody(swBody, swDoc) Then
             CountMacroGearsInPart = CountMacroGearsInPart + 1
-        ElseIf HasGearBodyNamePrefix(swBody.Name) Then
+        ElseIf HasGearBodyNamePrefix(swBody.name) Then
             CountMacroGearsInPart = CountMacroGearsInPart + 1
-        ElseIf TryParseGearBodyName(swBody.Name, pitchDia, z) Then
+        ElseIf TryParseGearBodyName(swBody.name, pitchDia, z) Then
             CountMacroGearsInPart = CountMacroGearsInPart + 1
         End If
     Next i
@@ -385,14 +395,14 @@ End Function
 Public Function ReadGearInputsFromForm() As Boolean
     On Error GoTo ReadFail
 
-    GearGeom.PressureAngleDeg = CDbl(UserForm1.tbPressureAngle.Text)
-    GearGeom.ModuleMM = CDbl(UserForm1.tbModule.Text)
-    GearGeom.NumTeeth = CLng(UserForm1.tbTeeth.Text)
-    GearGeom.WidthMM = CDbl(UserForm1.tbWidth.Text)
+    GearGeom.pressureAngleDeg = CDbl(UserForm1.tbPressureAngle.Text)
+    GearGeom.moduleMM = CDbl(UserForm1.tbModule.Text)
+    GearGeom.numTeeth = CLng(UserForm1.tbTeeth.Text)
+    GearGeom.widthMM = CDbl(UserForm1.tbWidth.Text)
     GearGeom.HubDiameterMM = GetFormDoubleOrDefault("tbHubDia", 0#)
     GearGeom.ShaftDiameterMM = GetFormDoubleOrDefault("tbShaftDia", 0#)
 
-    ReadGearInputsFromForm = ValidateGearInputsPublic(GearGeom.PressureAngleDeg, GearGeom.ModuleMM, GearGeom.NumTeeth, GearGeom.WidthMM)
+    ReadGearInputsFromForm = ValidateGearInputsPublic(GearGeom.pressureAngleDeg, GearGeom.moduleMM, GearGeom.numTeeth, GearGeom.widthMM)
     If ReadGearInputsFromForm Then
         CalculateGearGeometry
         DebugPrint "ReadGearInputsFromForm OK"
@@ -444,43 +454,43 @@ Public Sub CalculateGearGeometry()
     Dim z As Double
 
     Pi = 3.14159265358979
-    z = GearGeom.NumTeeth
-    alphaRad = GearGeom.PressureAngleDeg * Pi / 180#
+    z = GearGeom.numTeeth
+    alphaRad = GearGeom.pressureAngleDeg * Pi / 180#
 
-    GearGeom.PitchDiameterMM = GearGeom.ModuleMM * z
-    GearGeom.PitchRadiusMM = GearGeom.PitchDiameterMM / 2#
-    GearGeom.BaseDiameterMM = GearGeom.PitchDiameterMM * Cos(alphaRad)
+    GearGeom.pitchDiameterMM = GearGeom.moduleMM * z
+    GearGeom.PitchRadiusMM = GearGeom.pitchDiameterMM / 2#
+    GearGeom.BaseDiameterMM = GearGeom.pitchDiameterMM * Cos(alphaRad)
     GearGeom.BaseRadiusMM = GearGeom.BaseDiameterMM / 2#
 
     If GearGeom.IsInternal Then
-        GearGeom.AddendumDiameterMM = GearGeom.PitchDiameterMM - 2# * GearGeom.ModuleMM
-        GearGeom.DedendumDiameterMM = GearGeom.PitchDiameterMM + 2.5 * GearGeom.ModuleMM
+        GearGeom.AddendumDiameterMM = GearGeom.pitchDiameterMM - 2# * GearGeom.moduleMM
+        GearGeom.DedendumDiameterMM = GearGeom.pitchDiameterMM + 2.5 * GearGeom.moduleMM
     Else
-        GearGeom.AddendumDiameterMM = GearGeom.PitchDiameterMM + 2# * GearGeom.ModuleMM
-        GearGeom.DedendumDiameterMM = GearGeom.PitchDiameterMM - 2.5 * GearGeom.ModuleMM
+        GearGeom.AddendumDiameterMM = GearGeom.pitchDiameterMM + 2# * GearGeom.moduleMM
+        GearGeom.DedendumDiameterMM = GearGeom.pitchDiameterMM - 2.5 * GearGeom.moduleMM
     End If
     GearGeom.AddendumRadiusMM = GearGeom.AddendumDiameterMM / 2#
     GearGeom.DedendumRadiusMM = GearGeom.DedendumDiameterMM / 2#
 
-    If GearGeom.HubDiameterMM <= 0# Then GearGeom.HubDiameterMM = GearGeom.PitchDiameterMM * 0.4
+    If GearGeom.HubDiameterMM <= 0# Then GearGeom.HubDiameterMM = GearGeom.pitchDiameterMM * 0.4
     If GearGeom.ShaftDiameterMM <= 0# Then GearGeom.ShaftDiameterMM = 10#
     If GearGeom.HubDiameterMM <= GearGeom.ShaftDiameterMM Then
-        GearGeom.HubDiameterMM = GearGeom.ShaftDiameterMM + 2# * GearGeom.ModuleMM
+        GearGeom.HubDiameterMM = GearGeom.ShaftDiameterMM + 2# * GearGeom.moduleMM
     End If
     If GearGeom.HubDiameterMM >= GearGeom.DedendumDiameterMM Then
-        GearGeom.HubDiameterMM = GearGeom.DedendumDiameterMM - 2# * GearGeom.ModuleMM
+        GearGeom.HubDiameterMM = GearGeom.DedendumDiameterMM - 2# * GearGeom.moduleMM
     End If
 
     GearGeom.HubRadiusMM = GearGeom.HubDiameterMM / 2#
     GearGeom.ShaftRadiusMM = GearGeom.ShaftDiameterMM / 2#
 
-    GearGeom.RimWidthMM = GearGeom.WidthMM / 2#
-    GearGeom.HubWidthMM = GearGeom.WidthMM / 2#
+    GearGeom.RimWidthMM = GearGeom.widthMM / 2#
+    GearGeom.HubWidthMM = GearGeom.widthMM / 2#
 
-    GearGeom.CircularPitchMM = Pi * GearGeom.ModuleMM
+    GearGeom.CircularPitchMM = Pi * GearGeom.moduleMM
     GearGeom.AngularPitchDeg = 360# / z
 
-    GearGeom.GapArcLengthMM = Pi * GearGeom.PitchDiameterMM / z
+    GearGeom.GapArcLengthMM = Pi * GearGeom.pitchDiameterMM / z
     GearGeom.GapHalfArcLengthMM = GearGeom.GapArcLengthMM / 2#
     GearGeom.GapRootFilletMM = GearGeom.GapArcLengthMM * GEAR_MCM_ROOT_FILLET_RATIO
 
@@ -488,14 +498,14 @@ Public Sub CalculateGearGeometry()
     GearGeom.BaseRadiusM = GearGeom.BaseRadiusMM / MM_PER_M
     GearGeom.AddendumRadiusM = GearGeom.AddendumRadiusMM / MM_PER_M
     GearGeom.DedendumRadiusM = GearGeom.DedendumRadiusMM / MM_PER_M
-    GearGeom.WidthM = GearGeom.WidthMM / MM_PER_M
+    GearGeom.WidthM = GearGeom.widthMM / MM_PER_M
     GearGeom.HubRadiusM = GearGeom.HubRadiusMM / MM_PER_M
     GearGeom.ShaftRadiusM = GearGeom.ShaftRadiusMM / MM_PER_M
     GearGeom.RimWidthM = GearGeom.RimWidthMM / MM_PER_M
     GearGeom.HubWidthM = GearGeom.HubWidthMM / MM_PER_M
 
     DebugPrint "CalculateGearGeometry: " & IIf(GearGeom.IsInternal, "INTERNAL", "EXTERNAL") & _
-        " Dp=" & Format(GearGeom.PitchDiameterMM, "0.###") & _
+        " Dp=" & Format(GearGeom.pitchDiameterMM, "0.###") & _
         " Da=" & Format(GearGeom.AddendumDiameterMM, "0.###") & _
         " Dd=" & Format(GearGeom.DedendumDiameterMM, "0.###") & _
         " Hub=" & Format(GearGeom.HubDiameterMM, "0.###") & _
@@ -539,14 +549,14 @@ Private Function ResolveAndStoreFrontPlane() As Boolean
         Exit Function
     End If
 
-    gFrontPlaneName = swFrontPlaneFeat.Name
+    gFrontPlaneName = swFrontPlaneFeat.name
     On Error Resume Next
     desc = swFrontPlaneFeat.Description
     On Error GoTo 0
     If desc <> "" Then gFrontPlaneName = desc
 
     ResolveAndStoreFrontPlane = True
-    DebugPrint "Front plane resolved: " & gFrontPlaneName & " (feature " & swFrontPlaneFeat.Name & ")"
+    DebugPrint "Front plane resolved: " & gFrontPlaneName & " (feature " & swFrontPlaneFeat.name & ")"
 End Function
 
 ' Call Feature.Select (Sub in VBA - no reliable return value)
@@ -586,7 +596,7 @@ Public Function BeginSketchOnFrontPlane() As Boolean
         DebugPrint "BeginSketchOnFrontPlane: no front RefPlane"
         Exit Function
     End If
-    gFrontPlaneName = swFrontPlaneFeat.Name
+    gFrontPlaneName = swFrontPlaneFeat.name
 
     On Error Resume Next
     swFrontPlaneFeat.Select True
@@ -623,7 +633,7 @@ Public Function BeginSketchOnRightPlane() As Boolean
     On Error Resume Next
     swRight.Select False
     If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then
-        swModelDocExt.SelectByID2 swRight.Name, "PLANE", 0, 0, 0, False, 0, Nothing, 0
+        swModelDocExt.SelectByID2 swRight.name, "PLANE", 0, 0, 0, False, 0, Nothing, 0
     End If
     If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then
         swModelDocExt.SelectByID2 "Right Plane", "PLANE", 0, 0, 0, False, 0, Nothing, 0
@@ -658,7 +668,7 @@ Private Function SelectLastSketchForExtrude() As Boolean
     If swSkFeat Is Nothing Then Exit Function
 
     ClearSWSelection
-    skName = swSkFeat.Name
+    skName = swSkFeat.name
     On Error Resume Next
     swSkFeat.Select2 False, 0
     If swSelMgr.GetSelectedObjectCount2(-1) >= 1 Then
@@ -776,7 +786,7 @@ Private Function FindAxisSketchPointInActiveSketch() As SldWorks.SketchPoint
     bestDist = 1E+30
     For i = LBound(vPts) To UBound(vPts)
         Set swPt = vPts(i)
-        d = (swPt.X - xA) ^ 2 + (swPt.Y - yA) ^ 2
+        d = (swPt.x - xA) ^ 2 + (swPt.y - yA) ^ 2
         If d < bestDist Then
             bestDist = d
             Set FindAxisSketchPointInActiveSketch = swPt
@@ -922,8 +932,8 @@ Public Function ConstrainSketchPointToOrigin(ByVal swCenterPt As SldWorks.Sketch
     End If
 
     ' Method 3: snap to exact origin coords then re-try coincident.
-    swCenterPt.X = 0#
-    swCenterPt.Y = 0#
+    swCenterPt.x = 0#
+    swCenterPt.y = 0#
     ClearSWSelection
     boolstatus = swModelDocExt.SelectByID2("", "EXTSKETCHPOINT", 0#, 0#, 0#, False, 0, Nothing, 0)
     If boolstatus Then boolstatus = swCenterPt.Select4(True, Nothing)
@@ -955,7 +965,7 @@ Public Sub AddDistanceDimensionBetweenSelectedPoints(ByVal valueMM As Double, By
         Set swDim = swDispDim.GetDimension2(0)
         If Not swDim Is Nothing Then
             swDim.SystemValue = valueMM / MM_PER_M
-            swDim.Name = dimName
+            swDim.name = dimName
         End If
     Else
         DebugPrint "AddDistanceDimensionBetweenSelectedPoints WARN: could not place dim " & dimName
@@ -987,23 +997,266 @@ End Sub
 Public Sub ConstrainSketchPointCoincidentToSegment(ByVal swPt As SldWorks.SketchPoint, ByVal swSeg As SldWorks.SketchSegment)
     On Error Resume Next
     If swPt Is Nothing Or swSeg Is Nothing Then Exit Sub
-    ClearSWSelection
-    swPt.Select4 False, Nothing
-    swSeg.Select4 True, Nothing
-    swDoc.SketchAddConstraints "sgCOINCIDENT"
-    ClearSWSelection
+    ApplyCoincidentRelation COINC_SEL_SKETCH_POINT, swPt, , , , , , COINC_SEL_SKETCH_SEGMENT, swSeg
     On Error GoTo 0
 End Sub
 
 Public Sub ConstrainSketchSegmentsCoincident(ByVal swSeg1 As SldWorks.SketchSegment, ByVal swSeg2 As SldWorks.SketchSegment)
     On Error Resume Next
     If swSeg1 Is Nothing Or swSeg2 Is Nothing Then Exit Sub
+    ApplyCoincidentRelation COINC_SEL_SKETCH_SEGMENT, swSeg1, , , , , , COINC_SEL_SKETCH_SEGMENT, swSeg2
+    On Error GoTo 0
+End Sub
+
+' Select one side for ApplyCoincidentRelation. append=False clears first; append=True adds to selection.
+Private Function CoincidentSelectSide(ByVal kind As Long, ByVal obj As Object, _
+    ByVal xM As Double, ByVal yM As Double, ByVal sketchFeat As String, ByVal segName As String, _
+    ByVal epIndex As Long, ByVal append As Boolean) As Boolean
+    Dim swPt As SldWorks.SketchPoint
+    Dim swSeg As SldWorks.SketchSegment
+    Dim swFeat As SldWorks.Feature
+    Dim swSketch As SldWorks.Sketch
+    Dim vSegs As Variant
+    Dim vSeg As Variant
+    Dim swSkSeg As SldWorks.SketchSegment
+    Dim swActiveSk As SldWorks.Sketch
+    Dim vPts As Variant
+    Dim vPt As Variant
+    Dim xEp As Double
+    Dim yEp As Double
+    Dim zEp As Double
+    Dim docTitle As String
+    Dim selId As String
+
+    CoincidentSelectSide = False
+    On Error Resume Next
+
+    Select Case kind
+        Case COINC_SEL_SKETCH_POINT
+            Set swPt = obj
+            If swPt Is Nothing Then Exit Function
+            CoincidentSelectSide = swPt.Select4(append, Nothing)
+
+        Case COINC_SEL_SKETCH_SEGMENT
+            Set swSeg = obj
+            If swSeg Is Nothing Then Exit Function
+            CoincidentSelectSide = swSeg.Select4(append, Nothing)
+
+        Case COINC_SEL_SKETCH_XY
+            If Not append Then ClearSWSelection
+            CoincidentSelectSide = swModelDocExt.SelectByID2("", "SKETCHPOINT", xM, yM, 0#, append, 0, Nothing, 0)
+            If Not CoincidentSelectSide Then
+                CoincidentSelectSide = swModelDocExt.SelectByID2("", "SKETCHSEGMENT", xM, yM, 0#, append, 0, Nothing, 0)
+            End If
+            If Not CoincidentSelectSide And Not obj Is Nothing Then
+                Set swSeg = obj
+                CoincidentSelectSide = swSeg.Select4(append, Nothing)
+            End If
+
+        Case COINC_SEL_ARC_ENDPOINT
+            Set swSeg = obj
+            If swSeg Is Nothing Then Exit Function
+            If epIndex = 0 Then
+                swSeg.GetStartPoint2 xEp, yEp, zEp
+            Else
+                swSeg.GetEndPoint2 xEp, yEp, zEp
+            End If
+            If Not append Then ClearSWSelection
+            CoincidentSelectSide = swModelDocExt.SelectByID2("", "SKETCHPOINT", xEp, yEp, 0#, append, 0, Nothing, 0)
+            If Not CoincidentSelectSide Then
+                CoincidentSelectSide = swModelDocExt.SelectByID2("", "SKETCHSEGMENT", xEp, yEp, 0#, append, 0, Nothing, 0)
+            End If
+            If Not CoincidentSelectSide Then
+                CoincidentSelectSide = swSeg.Select4(append, Nothing)
+            End If
+
+        Case COINC_SEL_EXT_SEGMENT
+            If sketchFeat = "" Or segName = "" Then Exit Function
+            If Not append Then ClearSWSelection
+            selId = segName & "@" & sketchFeat
+            CoincidentSelectSide = swModelDocExt.SelectByID2(selId, "EXTSKETCHSEGMENT", xM, yM, 0#, append, 0, Nothing, 0)
+            If Not CoincidentSelectSide Then
+                docTitle = swDoc.GetTitle
+                If docTitle <> "" Then
+                    CoincidentSelectSide = swModelDocExt.SelectByID2(selId & "@" & docTitle, "EXTSKETCHSEGMENT", xM, yM, 0#, append, 0, Nothing, 0)
+                End If
+            End If
+
+        Case COINC_SEL_SEG_IN_SKETCH
+            If sketchFeat = "" Or segName = "" Then Exit Function
+            Set swFeat = swPart.FeatureByName(sketchFeat)
+            If swFeat Is Nothing Then Exit Function
+            Set swSketch = swFeat.GetSpecificFeature2
+            If swSketch Is Nothing Then Exit Function
+            vSegs = swSketch.GetSketchSegments
+            If IsEmpty(vSegs) Then Exit Function
+            If Not append Then ClearSWSelection
+            For Each vSeg In vSegs
+                Set swSkSeg = vSeg
+                If swSkSeg.GetName = segName Then
+                    CoincidentSelectSide = swSkSeg.Select4(append, Nothing)
+                    Exit For
+                End If
+            Next vSeg
+
+        Case COINC_SEL_LINE_ENDPOINT
+            Set swSeg = obj
+            If swSeg Is Nothing Then Exit Function
+            If epIndex = 0 Then
+                swSeg.GetStartPoint2 xEp, yEp, zEp
+            Else
+                swSeg.GetEndPoint2 xEp, yEp, zEp
+            End If
+            If Not append Then ClearSWSelection
+            Set swActiveSk = swSketchManager.ActiveSketch
+            If Not swActiveSk Is Nothing Then
+                vPts = swActiveSk.GetSketchPoints2
+                If Not IsEmpty(vPts) Then
+                    For Each vPt In vPts
+                        Set swPt = vPt
+                        If Abs(swPt.x - xEp) < 0.000000001 And Abs(swPt.y - yEp) < 0.000000001 Then
+                            CoincidentSelectSide = swPt.Select4(append, Nothing)
+                            GoTo LineEpDone
+                        End If
+                    Next vPt
+                End If
+            End If
+            CoincidentSelectSide = swModelDocExt.SelectByID2("", "SKETCHPOINT", xEp, yEp, 0#, append, 0, Nothing, 0)
+LineEpDone:
+
+        Case Else
+            CoincidentSelectSide = False
+    End Select
+
+    On Error GoTo 0
+End Function
+
+' One coincident constraint from two typed selections. Side A first, side B appended.
+' Examples:
+'   Point on line:  ApplyCoincidentRelation COINC_SEL_SKETCH_POINT, pt, , , , , , COINC_SEL_SKETCH_SEGMENT, line
+'   Arc start / vertical @ pick: ApplyCoincidentRelation COINC_SEL_ARC_ENDPOINT, arc, , , , , 0, COINC_SEL_SKETCH_XY, mirrorLine, xPick, yPick
+'   Arc end / layout pitch: ApplyCoincidentRelation COINC_SEL_ARC_ENDPOINT, arc, , , , , 1, COINC_SEL_EXT_SEGMENT, , xEp, yEp, "Gear1_Layout", "Arc2"
+Public Function ApplyCoincidentRelation( _
+    ByVal kindA As Long, Optional ByVal objA As Object = Nothing, _
+    Optional ByVal xA As Double = 0, Optional ByVal yA As Double = 0, _
+    Optional ByVal sketchA As String = "", Optional ByVal segNameA As String = "", _
+    Optional ByVal epIndexA As Long = 0, _
+    Optional ByVal kindB As Long = 0, Optional ByVal objB As Object = Nothing, _
+    Optional ByVal xB As Double = 0, Optional ByVal yB As Double = 0, _
+    Optional ByVal sketchB As String = "", Optional ByVal segNameB As String = "", _
+    Optional ByVal epIndexB As Long = 0) As Boolean
+
+    ApplyCoincidentRelation = False
+    If kindB = 0 Then Exit Function
+    On Error Resume Next
+
     ClearSWSelection
-    swSeg1.Select4 False, Nothing
-    swSeg2.Select4 True, Nothing
+    If Not CoincidentSelectSide(kindA, objA, xA, yA, sketchA, segNameA, epIndexA, False) Then Exit Function
+    If Not CoincidentSelectSide(kindB, objB, xB, yB, sketchB, segNameB, epIndexB, True) Then Exit Function
+
     swDoc.SketchAddConstraints "sgCOINCIDENT"
+    ApplyCoincidentRelation = (Err.Number = 0)
+    If Not ApplyCoincidentRelation Then DebugPrint "ApplyCoincidentRelation WARN kindA=" & kindA & " kindB=" & kindB
     ClearSWSelection
     On Error GoTo 0
+End Function
+
+' SketchPoint coincident to a named segment inside another sketch feature (your working select pattern).
+Public Function ConstrainSketchPointCoincidentToSegmentInSketch( _
+    ByVal swPt As SldWorks.SketchPoint, _
+    ByVal sketchFeatName As String, _
+    ByVal segName As String) As Boolean
+
+    Dim swFeat As SldWorks.Feature
+    Dim swSketch As SldWorks.Sketch
+    Dim vSegs As Variant
+    Dim vSeg As Variant
+    Dim swSeg As SldWorks.SketchSegment
+
+    ConstrainSketchPointCoincidentToSegmentInSketch = False
+    On Error GoTo Fail
+
+    If swPt Is Nothing Then Exit Function
+    If sketchFeatName = "" Or segName = "" Then Exit Function
+
+    Set swFeat = swDoc.FeatureByName(sketchFeatName)
+    If swFeat Is Nothing Then GoTo Fail
+
+    Set swSketch = swFeat.GetSpecificFeature2
+    If swSketch Is Nothing Then GoTo Fail
+
+    ClearSWSelection
+    vSegs = swSketch.GetSketchSegments
+    If IsEmpty(vSegs) Then GoTo Fail
+
+    If Not swPt.Select4(False, Nothing) Then GoTo Fail
+
+    For Each vSeg In vSegs
+        Set swSeg = vSeg
+        If swSeg.GetName = segName Then
+            If Not swSeg.Select4(True, Nothing) Then GoTo Fail
+            swDoc.SketchAddConstraints "sgCOINCIDENT"
+            ClearSWSelection
+            ConstrainSketchPointCoincidentToSegmentInSketch = True
+            Exit Function
+        End If
+    Next vSeg
+
+Fail:
+    ClearSWSelection
+    On Error GoTo 0
+End Function
+
+' Segment endpoint (GetEndPoint2 / GetStartPoint2) coincident to named segment in another sketch.
+Public Function ConstrainSegmentEndpointCoincidentToSegmentInSketch( _
+    ByVal swSeg As SldWorks.SketchSegment, _
+    ByVal useEndPoint As Boolean, _
+    ByVal sketchFeatName As String, _
+    ByVal targetSegName As String) As Boolean
+
+    Dim swPt As SldWorks.SketchPoint
+
+    ConstrainSegmentEndpointCoincidentToSegmentInSketch = False
+    If swSeg Is Nothing Then Exit Function
+    On Error Resume Next
+    If useEndPoint Then
+        Set swPt = swSeg.GetEndPoint2
+    Else
+        Set swPt = swSeg.GetStartPoint2
+    End If
+    On Error GoTo 0
+    If swPt Is Nothing Then Exit Function
+
+    ConstrainSegmentEndpointCoincidentToSegmentInSketch = _
+        ConstrainSketchPointCoincidentToSegmentInSketch(swPt, sketchFeatName, targetSegName)
+End Function
+
+' Mate segment start (GetStartPoint2) or end (GetEndPoint2) to a sketch point.
+Public Sub ConstrainSegmentStartPointCoincidentToPoint(ByVal swSeg As SldWorks.SketchSegment, ByVal swPt As SldWorks.SketchPoint)
+    Dim swStart As SldWorks.SketchPoint
+    On Error Resume Next
+    If swSeg Is Nothing Or swPt Is Nothing Then Exit Sub
+    Set swStart = swSeg.GetStartPoint2
+    If swStart Is Nothing Then Exit Sub
+    ConstrainSketchPointsCoincident swStart, swPt
+    On Error GoTo 0
+End Sub
+
+Public Sub ConstrainSegmentEndPointCoincidentToPoint(ByVal swSeg As SldWorks.SketchSegment, ByVal swPt As SldWorks.SketchPoint)
+    Dim swEnd As SldWorks.SketchPoint
+    On Error Resume Next
+    If swSeg Is Nothing Or swPt Is Nothing Then Exit Sub
+    Set swEnd = swSeg.GetEndPoint2
+    If swEnd Is Nothing Then Exit Sub
+    ConstrainSketchPointsCoincident swEnd, swPt
+    On Error GoTo 0
+End Sub
+
+Public Sub ConstrainPointAtCoordCoincidentToSegmentAtCoord( _
+    ByVal swPt As SldWorks.SketchPoint, _
+    ByVal sketchName As String, _
+    ByVal segName As String)
+    ConstrainSketchPointCoincidentToSegmentInSketch swPt, sketchName, segName
 End Sub
 
 Public Function BuildDrivingGearLayoutCenterSelectId() As String
@@ -1183,9 +1436,9 @@ Private Sub DeleteAllRefAxisFeaturesExcept(Optional ByVal keepName As String = "
     Set ft = swPart.FirstFeature
     Do While Not ft Is Nothing
         If FeatureIsRefAxis(ft) Then
-            If keepName = "" Or StrComp(ft.Name, keepName, vbTextCompare) <> 0 Then
+            If keepName = "" Or StrComp(ft.name, keepName, vbTextCompare) <> 0 Then
                 ReDim Preserve names(0 To n)
-                names(n) = ft.Name
+                names(n) = ft.name
                 n = n + 1
             End If
         End If
@@ -1389,7 +1642,7 @@ Public Sub AddDiameterDimensionToCircle(ByVal swCircle As SldWorks.SketchSegment
             Else
                 swDim.SystemValue = diameterM
             End If
-            swDim.Name = dimName
+            swDim.name = dimName
         End If
     End If
     ClearSWSelection
@@ -1417,7 +1670,7 @@ Public Sub AddLinearDimensionToLine(ByVal swLine As SketchSegment, ByVal dimName
         Set swDim = swDispDim.GetDimension2(0)
         If Not swDim Is Nothing Then
             swDim.SystemValue = valueMM / MM_PER_M
-            swDim.Name = dimName
+            swDim.name = dimName
         End If
     End If
     ClearSWSelection
@@ -1452,7 +1705,7 @@ Private Function TryReuseStackedBaseGearAxis() As Boolean
     Set ft = FindRefAxisFeatureByName(GearTrainDrivingAxisName)
     If ft Is Nothing Then Exit Function
     Set swGearAxisFeat = ft
-    gAxisName = ft.Name
+    gAxisName = ft.name
     TryReuseStackedBaseGearAxis = True
     DebugPrint "Stacked gear reuses base ref axis: " & gAxisName
 End Function
@@ -1920,8 +2173,8 @@ End Function
 ' =============================================================================
 
 Public Function BuildGearBodyName() As String
-    BuildGearBodyName = "Gear" & GetCurrentGearIndex() & "_" & CStr(GearGeom.NumTeeth) & "T " & _
-        FormatPitchDiameterForName(GearGeom.PitchDiameterMM)
+    BuildGearBodyName = "Gear" & GetCurrentGearIndex() & "_" & CStr(GearGeom.numTeeth) & "T " & _
+        FormatPitchDiameterForName(GearGeom.pitchDiameterMM)
 End Function
 
 Public Function BuildGearPrefixName() As String
@@ -1979,7 +2232,7 @@ End Sub
 Public Sub RenameSketchFeatureSafe(ByVal swSkFeat As SldWorks.Feature, ByVal newName As String)
     On Error Resume Next
     If swSkFeat Is Nothing Or newName = "" Then Exit Sub
-    swSkFeat.Name = newName
+    swSkFeat.name = newName
     DebugPrint "Renamed sketch feature: " & newName
     On Error GoTo 0
 End Sub
@@ -2020,7 +2273,7 @@ End Function
 Public Sub ApplyGearAxisFeatureName(ByVal swAxisFeat As SldWorks.Feature, ByVal axisName As String)
     On Error Resume Next
     If swAxisFeat Is Nothing Or axisName = "" Then Exit Sub
-    swAxisFeat.Name = axisName
+    swAxisFeat.name = axisName
     gAxisName = axisName
     Set swGearAxisFeat = swAxisFeat
     DebugPrint "Named gear ref axis: " & axisName
@@ -2085,11 +2338,11 @@ Public Sub StoreGearMetadataOnPart()
     DebugPrint "StoreGearMetadataOnPart: begin"
     On Error Resume Next
     If swModelDocExt Is Nothing Then Exit Sub
-    SetPartCustomProperty GEAR_PROP_MODULE, CStr(GearGeom.ModuleMM)
-    SetPartCustomProperty GEAR_PROP_TEETH, CStr(GearGeom.NumTeeth)
-    SetPartCustomProperty GEAR_PROP_PRESSURE, CStr(GearGeom.PressureAngleDeg)
-    SetPartCustomProperty GEAR_PROP_WIDTH, CStr(GearGeom.WidthMM)
-    SetPartCustomProperty GEAR_PROP_PITCH_DIA, CStr(GearGeom.PitchDiameterMM)
+    SetPartCustomProperty GEAR_PROP_MODULE, CStr(GearGeom.moduleMM)
+    SetPartCustomProperty GEAR_PROP_TEETH, CStr(GearGeom.numTeeth)
+    SetPartCustomProperty GEAR_PROP_PRESSURE, CStr(GearGeom.pressureAngleDeg)
+    SetPartCustomProperty GEAR_PROP_WIDTH, CStr(GearGeom.widthMM)
+    SetPartCustomProperty GEAR_PROP_PITCH_DIA, CStr(GearGeom.pitchDiameterMM)
     SetPartCustomProperty GEAR_PROP_ADDENDUM_DIA, CStr(GearGeom.AddendumDiameterMM)
     SetPartCustomProperty GEAR_PROP_IS_INTERNAL, IIf(GearGeom.IsInternal, "1", "0")
     SetPartCustomProperty GEAR_PROP_GEAR_INDEX, CStr(GetCurrentGearIndex())
@@ -2161,7 +2414,7 @@ Public Function ReadGearMetadataFromDoc(ByVal swSourceDoc As SldWorks.ModelDoc2,
     If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_MODULE, moduleMM) Then Exit Function
     If Not ReadPartCustomPropertyLong(swExt, GEAR_PROP_TEETH, numTeeth) Then Exit Function
     If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_PRESSURE, pressureDeg) Then Exit Function
-    If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_WIDTH, widthMM) Then widthMM = GearGeom.WidthMM
+    If Not ReadPartCustomPropertyDouble(swExt, GEAR_PROP_WIDTH, widthMM) Then widthMM = GearGeom.widthMM
     ReadGearMetadataFromDoc = True
     Exit Function
 ReadFail:
@@ -2258,15 +2511,15 @@ Public Function ReadGearMetadataFromBody(ByVal swBody As SldWorks.Body2, ByVal s
 
     ReadGearMetadataFromBody = False
     pressureDeg = 20#
-    widthMM = GearGeom.WidthMM
+    widthMM = GearGeom.widthMM
     If widthMM <= 0# Then widthMM = 10#
 
     If Not swBody Is Nothing Then
-        If TryParseGearBodyName(swBody.Name, pitchDia, numTeeth) Then
+        If TryParseGearBodyName(swBody.name, pitchDia, numTeeth) Then
             moduleMM = pitchDia / CDbl(numTeeth)
             If Not swPartDoc Is Nothing Then
                 Set swExt = swPartDoc.Extension
-                gearIdx = ParseGearIndexFromBodyName(swBody.Name)
+                gearIdx = ParseGearIndexFromBodyName(swBody.name)
                 If gearIdx > 0 Then
                     If ReadGearGlobalsFromEquations(swPartDoc, gearIdx, moduleMM, numTeeth, pressureDeg, widthMM) Then
                         GoTo BodyMetaOk
@@ -2300,7 +2553,7 @@ Public Function FindSolidBodyByName(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal
     If IsEmpty(vBodies) Then Exit Function
     For i = LBound(vBodies) To UBound(vBodies)
         Set swBody = vBodies(i)
-        If StrComp(Trim$(swBody.Name), bodyName, vbTextCompare) = 0 Then
+        If StrComp(Trim$(swBody.name), bodyName, vbTextCompare) = 0 Then
             Set FindSolidBodyByName = swBody
             Exit Function
         End If
@@ -2332,7 +2585,7 @@ Public Sub NameGearSolidBodyAfterBuild()
         DebugPrint "NameGearSolidBodyAfterBuild: no solid body found"
         Exit Sub
     End If
-    swBody.Name = newName
+    swBody.name = newName
     DebugPrint "Named gear solid body: " & newName
     On Error GoTo 0
 End Sub
@@ -2444,16 +2697,16 @@ End Function
 
 Public Sub CreateGearGlobalVariableEquations()
     DebugPrint "CreateGearGlobalVariableEquations: begin"
-    AddOrUpdateGlobalEquation GearGlobalVarName("PressureAngle"), Format(GearGeom.PressureAngleDeg, "0.####")
-    AddOrUpdateGlobalEquation GearGlobalVarName("Module"), Format(GearGeom.ModuleMM, "0.####")
-    AddOrUpdateGlobalEquation GearGlobalVarName("Teeth"), CStr(GearGeom.NumTeeth)
-    AddOrUpdateGlobalEquation GearGlobalVarName("Width"), Format(GearGeom.WidthMM, "0.####")
+    AddOrUpdateGlobalEquation GearGlobalVarName("PressureAngle"), Format(GearGeom.pressureAngleDeg, "0.####")
+    AddOrUpdateGlobalEquation GearGlobalVarName("Module"), Format(GearGeom.moduleMM, "0.####")
+    AddOrUpdateGlobalEquation GearGlobalVarName("Teeth"), CStr(GearGeom.numTeeth)
+    AddOrUpdateGlobalEquation GearGlobalVarName("Width"), Format(GearGeom.widthMM, "0.####")
     AddOrUpdateGlobalEquation GearGlobalVarName("HubDiameter"), Format(GearGeom.HubDiameterMM, "0.####")
     AddOrUpdateGlobalEquation GearGlobalVarName("ShaftDiameter"), Format(GearGeom.ShaftDiameterMM, "0.####")
     AddOrUpdateGlobalEquation GearGlobalVarName("RimWidth"), Format(GearGeom.RimWidthMM, "0.####")
     AddOrUpdateGlobalEquation GearGlobalVarName("GapArcLength"), Format(GearGeom.GapArcLengthMM, "0.########")
     AddOrUpdateGlobalEquation GearGlobalVarName("GapRootFillet"), Format(GearGeom.GapRootFilletMM, "0.########")
-    DebugPrint "CreateGearGlobalVariableEquations: OK count=" & GearGeom.NumTeeth
+    DebugPrint "CreateGearGlobalVariableEquations: OK count=" & GearGeom.numTeeth
 End Sub
 
 Private Function BuildPitchDiameterEquationRhs() As String
@@ -2498,7 +2751,7 @@ Private Sub TryLinkPatternInstanceEquation()
     Dim featName As String
     Dim qTeeth As String
     If swPatternFeat Is Nothing Then Exit Sub
-    featName = swPatternFeat.Name
+    featName = swPatternFeat.name
     qTeeth = EqQuotedName(GearGlobalVarName("Teeth"))
     If Not AddOrUpdateDimensionEquation("TotalInstances@" & featName, qTeeth) Then
         AddOrUpdateDimensionEquation "D1@" & featName, qTeeth
@@ -2580,7 +2833,7 @@ Private Sub LinkMcMasterFilletEquation()
     Dim qM As String
     Dim qZ As String
     If swFilletFeat Is Nothing Then Exit Sub
-    featName = swFilletFeat.Name
+    featName = swFilletFeat.name
     qM = EqQuotedName(GearGlobalVarName("Module"))
     qZ = EqQuotedName(GearGlobalVarName("Teeth"))
     If GearGeom.IsInternal Then
@@ -2593,7 +2846,7 @@ End Sub
 Private Sub LinkMcMasterCutDepthEquation()
     Dim featName As String
     If swToothCutFeat Is Nothing Then Exit Sub
-    featName = swToothCutFeat.Name
+    featName = swToothCutFeat.name
     AddOrUpdateDimensionEquation "D1@" & featName, EqQuotedName(GearGlobalVarName("RimWidth"))
 End Sub
 
@@ -2669,11 +2922,11 @@ Public Function SelectSolidBodyWithMark(ByVal swBody As SldWorks.Body2, ByVal ap
     If swBody Is Nothing Then Exit Function
     Set sd = swSelMgr.CreateSelectData
     If Not sd Is Nothing Then
-        sd.Mark = mark
+        sd.mark = mark
         SelectSolidBodyWithMark = swBody.Select4(append, sd)
         If SelectSolidBodyWithMark Then Exit Function
     End If
-    bodyName = Trim$(swBody.Name)
+    bodyName = Trim$(swBody.name)
     If bodyName <> "" Then
         SelectSolidBodyWithMark = swModelDocExt.SelectByID2(bodyName, "SOLIDBODY", 0#, 0#, 0#, append, mark, Nothing, 0)
     End If
@@ -2734,7 +2987,7 @@ Public Function CombineGearBodies() As Boolean
 
     ClearSWSelection
     RebuildSWPart
-    DebugPrint "CombineGearBodies OK (" & swCombineFeat.Name & ")"
+    DebugPrint "CombineGearBodies OK (" & swCombineFeat.name & ")"
     CombineGearBodies = True
     Exit Function
 
@@ -2765,7 +3018,7 @@ Public Function RebuildAndValidate() As Boolean
         If feat.IsSuppressed = False Then
             If feat.GetErrorCode2(True) <> 0 Then
                 errCount = errCount + 1
-                DebugPrint "Feature error: " & feat.Name & " code=" & feat.GetErrorCode2(True)
+                DebugPrint "Feature error: " & feat.name & " code=" & feat.GetErrorCode2(True)
                 failed = True
             End If
         End If
@@ -3114,7 +3367,7 @@ End Sub
 
 Private Function BodyDisplayName(ByVal swBody As SldWorks.Body2, ByVal index1 As Long) As String
     On Error Resume Next
-    BodyDisplayName = Trim$(swBody.Name)
+    BodyDisplayName = Trim$(swBody.name)
     If BodyDisplayName = "" Then BodyDisplayName = "Solid Body " & CStr(index1)
     On Error GoTo 0
 End Function
@@ -3356,7 +3609,7 @@ Public Function PickDrivingGearBodyFromSelection() As Boolean
 
     GearTrainDrivingPartTitle = swPartDoc.GetTitle
     If Not swBody Is Nothing Then
-        GearTrainDrivingBodyLabel = Trim$(swBody.Name)
+        GearTrainDrivingBodyLabel = Trim$(swBody.name)
     Else
         GearTrainDrivingBodyLabel = "Solid Body"
     End If
@@ -3375,14 +3628,14 @@ Public Function ApplyDrivenGearInputsFromDrivingGear() As Boolean
     ApplyDrivenGearInputsFromDrivingGear = False
     If GearTrainDrivingTeeth <= 0 Or GearTrainDrivingModuleMM <= 0 Then Exit Function
 
-    GearGeom.PressureAngleDeg = GearTrainDrivingPressureDeg
-    GearGeom.ModuleMM = GearTrainDrivingModuleMM
-    If GearTrainDrivingWidthMM > 0 Then GearGeom.WidthMM = GearTrainDrivingWidthMM
+    GearGeom.pressureAngleDeg = GearTrainDrivingPressureDeg
+    GearGeom.moduleMM = GearTrainDrivingModuleMM
+    If GearTrainDrivingWidthMM > 0 Then GearGeom.widthMM = GearTrainDrivingWidthMM
 
-    GearTrainCenterDistanceMM = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, GearGeom.NumTeeth, _
+    GearTrainCenterDistanceMM = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, GearGeom.numTeeth, _
         GearTrainDrivingIsInternal, GearGeom.IsInternal)
     ApplyDrivenGearInputsFromDrivingGear = True
-    DebugPrint "Driven gear inherits m=" & GearGeom.ModuleMM & " pa=" & GearGeom.PressureAngleDeg & _
+    DebugPrint "Driven gear inherits m=" & GearGeom.moduleMM & " pa=" & GearGeom.pressureAngleDeg & _
         " C=" & Format(GearTrainCenterDistanceMM, "0.###") & " mm"
 End Function
 
@@ -3390,11 +3643,13 @@ Public Function ApplyStackedGearInputsFromBaseGear() As Boolean
     ApplyStackedGearInputsFromBaseGear = False
     If GearTrainDrivingTeeth <= 0 Or GearTrainDrivingModuleMM <= 0 Then Exit Function
 
-    GearGeom.PressureAngleDeg = GearTrainDrivingPressureDeg
-    GearGeom.ModuleMM = GearTrainDrivingModuleMM
+    GearGeom.pressureAngleDeg = GearTrainDrivingPressureDeg
+    GearGeom.moduleMM = GearTrainDrivingModuleMM
     ApplyStackedGearInputsFromBaseGear = True
-    DebugPrint "Stacked gear inherits m=" & GearGeom.ModuleMM & " pa=" & GearGeom.PressureAngleDeg & _
-        " width=" & Format(GearGeom.WidthMM, "0.###") & " mm from form"
+    DebugPrint "Stacked gear inherits m=" & GearGeom.moduleMM & " pa=" & GearGeom.pressureAngleDeg & _
+        " width=" & Format(GearGeom.widthMM, "0.###") & " mm from form"
 End Function
 
 ' Sketch dimension names (InvoluteGear_*) complement custom properties on the part.
+
+

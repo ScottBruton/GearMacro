@@ -65,6 +65,9 @@ Public Function CreateMasterLayoutSketch() As Boolean
         swCircles(i).ConstructionGeometry = True
         ConstrainSketchPointConcentricToCircle swCenterPt, swCircles(i)
         AddDiameterDimensionToCircle swCircles(i), labels(i), diams(i)
+        If i = 1 Then TryRenameSketchSegment swCircles(i), BuildGearPrefixName() & "_OD"
+        If i = 2 Then TryRenameSketchSegment swCircles(i), BuildGearPrefixName() & "_Pitch"
+        If i = 3 Then TryRenameSketchSegment swCircles(i), BuildGearPrefixName() & "_Root"
     Next i
 
     ' --- Close sketch and rename feature to GearN_Layout -------------------------
