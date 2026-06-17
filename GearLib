@@ -45,6 +45,7 @@ Public Const GEAR_DIM_NUM_TEETH As String = "InvoluteGear_NumTeeth"
 Public Const GEAR_DIM_PRESSURE_ANGLE As String = "InvoluteGear_PressureAngle"
 Public Const GEAR_DIM_WIDTH As String = "InvoluteGear_Width"
 Public Const GEAR_DIM_PITCH_DIAMETER As String = "InvoluteGear_PitchDiameter"
+Public Const GEAR_DIM_LAYOUT_BASE As String = "InvoluteGear_BaseDia"
 Public Const GEAR_DIM_LAYOUT_OD As String = "InvoluteGear_OD"
 Public Const GEAR_DIM_LAYOUT_PITCH As String = "InvoluteGear_PitchDia"
 Public Const GEAR_DIM_LAYOUT_ROOT As String = "InvoluteGear_RootDia"
@@ -54,18 +55,11 @@ Public Const GEAR_DIM_LAYOUT_CENTER_DIST As String = "InvoluteGear_LayoutCenterD
 Public Const GEAR_DIM_REVOLVE_RIM_WIDTH As String = "InvoluteGear_RimWidth"
 Public Const GEAR_DIM_REVOLVE_TOTAL_AXIAL As String = "InvoluteGear_TotalAxial"
 Public Const GEAR_DIM_GAP_ARC As String = "InvoluteGear_GapArc"
-Public Const GEAR_DIM_GAP_PITCH_REF_ARC As String = "InvoluteGear_GapPitchRefArc"
 Public Const GEAR_DIM_GAP_HALF_ARC As String = "InvoluteGear_GapHalfArc"
 Public Const GEAR_DIM_GAP_ROOT_FILLET As String = "InvoluteGear_GapRootFillet"
 Public Const GEAR_DIM_GAP_FLANK_ANGLE As String = "InvoluteGear_GapFlankAngle"
 Public Const GEAR_DIM_GAP_FLANK_ARC_RADIUS As String = "InvoluteGear_GapFlankArcRadius"
 Public Const GEAR_DIM_FILLET As String = "InvoluteGear_Fillet"
-Public Const GEAR_FLANK_PA_ARC As Long = 0
-Public Const GEAR_FLANK_INVOLUTE As Long = 1
-
-Public gHalfPitchPlaneName As String
-Public gFullPitchPlaneName As String
-Public GearGapFlankMode As Long
 
 ' ApplyCoincidentRelation — entity kind for each side (A = first pick, B = second pick append)
 Public Const COINC_SEL_SKETCH_POINT As Long = 1       ' obj = SketchPoint
@@ -247,10 +241,6 @@ Public Sub ResetGearBuildFeatureRefs()
     Set swToothCutFeat = Nothing
     Set swPatternFeat = Nothing
     Set swCombineFeat = Nothing
-    Set swHalfPitchPlaneFeat = Nothing
-    Set swFullPitchPlaneFeat = Nothing
-    Set swGapTipFilletFeat = Nothing
-    Set swGapRootFilletFeat = Nothing
     Set swFrontPlaneFeat = Nothing
     Tooth_ResetBuildRefs
     gLayoutSketchFeatName = ""
@@ -259,9 +249,6 @@ Public Sub ResetGearBuildFeatureRefs()
     gBlankSketchFeatName = ""
     gRevolveAxisSegSelectName = ""
     gGapSketchFeatName = ""
-    gHalfPitchPlaneName = ""
-    gFullPitchPlaneName = ""
-    GearGapFlankMode = GEAR_FLANK_PA_ARC
     gCurrentGearIndex = 0
 End Sub
 
@@ -415,7 +402,6 @@ Public Function ReadGearInputsFromForm() As Boolean
     GearGeom.widthMM = CDbl(UserForm1.tbWidth.Text)
     GearGeom.HubDiameterMM = GetFormDoubleOrDefault("tbHubDia", 0#)
     GearGeom.ShaftDiameterMM = GetFormDoubleOrDefault("tbShaftDia", 0#)
-    ReadGearGapFlankModeFromForm
 
     ReadGearInputsFromForm = ValidateGearInputsPublic(GearGeom.pressureAngleDeg, GearGeom.moduleMM, GearGeom.numTeeth, GearGeom.widthMM)
     If ReadGearInputsFromForm Then
@@ -429,22 +415,6 @@ ReadFail:
     ReadGearInputsFromForm = False
 End Function
 
-Public Sub ReadGearGapFlankModeFromForm()
-    GearGapFlankMode = GEAR_FLANK_PA_ARC
-    On Error Resume Next
-    If UserForm1.optInvoluteFlank.Value Then GearGapFlankMode = GEAR_FLANK_INVOLUTE
-    On Error GoTo 0
-    DebugPrint "ReadGearGapFlankModeFromForm: mode=" & IIf(GearGapFlankMode = GEAR_FLANK_INVOLUTE, "INVOLUTE", "PA_ARC")
-End Sub
-
-Public Function GetHalfPitchPlaneName() As String
-    GetHalfPitchPlaneName = gHalfPitchPlaneName
-End Function
-
-Public Function GetFullPitchPlaneName() As String
-    GetFullPitchPlaneName = gFullPitchPlaneName
-End Function
-
 Public Function ValidateGearInputsPublic(ByVal pressureAngleDeg As Double, ByVal moduleMM As Double, ByVal numTeeth As Long, ByVal widthMM As Double) As Boolean
     Dim errMsg As String
     Dim minTeeth As Double
@@ -455,6 +425,11 @@ Public Function ValidateGearInputsPublic(ByVal pressureAngleDeg As Double, ByVal
     If moduleMM <= 0# Then errMsg = errMsg & "Invalid module." & vbCrLf
     If numTeeth < 3 Then errMsg = errMsg & "Tooth count must be >= 3." & vbCrLf
     If widthMM <= 0# Then errMsg = errMsg & "Invalid width." & vbCrLf
+    If Not GearGeom.IsInternal Then
+        If (moduleMM * numTeeth / 2#) - (1.25 * moduleMM) <= 0# Then
+            errMsg = errMsg & "Invalid root radius (dedendum extends past centre)." & vbCrLf
+        End If
+    End If
 
     If GearGeom.IsInternal Then
         Dim tipDia As Double
@@ -524,7 +499,6 @@ Public Sub CalculateGearGeometry()
     GearGeom.GapArcLengthMM = Pi * GearGeom.pitchDiameterMM / z
     GearGeom.GapHalfArcLengthMM = GearGeom.GapArcLengthMM / 2#
     GearGeom.GapRootFilletMM = GearGeom.GapArcLengthMM * GEAR_MCM_ROOT_FILLET_RATIO
-    GearGeom.QuarterPitchAngleDeg = 360# / (4# * z)
 
     GearGeom.PitchRadiusM = GearGeom.PitchRadiusMM / MM_PER_M
     GearGeom.BaseRadiusM = GearGeom.BaseRadiusMM / MM_PER_M
@@ -1624,130 +1598,6 @@ Public Function CreateGearRefAxisFromLayoutSketchPoint() As Boolean
         DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: ref axis not committed (count=" & CountRefAxisFeatures() & ")"
     End If
 End Function
-
-' =============================================================================
-' Quarter-pitch reference planes (half gap = 2*cQPA, full gap = 4*cQPA from vertical)
-' Used by Tooth gap sketch for collinear half/full pitch radials.
-' =============================================================================
-Private Function InsertAngledRefPlaneFromFrontAndAxis(ByVal angleRad As Double) As SldWorks.Feature
-    Const SW_RP_ANGLE As Long = 16
-    Const SW_RP_COINCIDENT As Long = 4
-
-    Set InsertAngledRefPlaneFromFrontAndAxis = Nothing
-    If swFeatMgr Is Nothing Then Exit Function
-    If swFrontPlaneFeat Is Nothing Then
-        If Not ResolveAndStoreFrontPlane() Then Exit Function
-    End If
-    If swGearAxisFeat Is Nothing And gAxisName <> "" Then
-        Set swGearAxisFeat = FindRefAxisFeatureByName(gAxisName)
-    End If
-    If swGearAxisFeat Is Nothing Then Exit Function
-
-    ExitActiveSketchIfAny
-    ClearSWSelection
-    RebuildSWPart
-
-    On Error Resume Next
-    If Not swFrontPlaneFeat.Select2(False, 0) Then Exit Function
-    If Not swGearAxisFeat.Select2(True, 1) Then Exit Function
-    Set InsertAngledRefPlaneFromFrontAndAxis = swFeatMgr.InsertRefPlane(SW_RP_ANGLE, angleRad, SW_RP_COINCIDENT, 0#, 0#, 0#)
-    If InsertAngledRefPlaneFromFrontAndAxis Is Nothing Then
-        Set InsertAngledRefPlaneFromFrontAndAxis = swFeatMgr.InsertRefPlane(SW_RP_ANGLE, 3, SW_RP_COINCIDENT, 0, angleRad, 0#)
-    End If
-    ClearSWSelection
-    On Error GoTo 0
-End Function
-
-Private Sub RenameRefPlaneFeatureSafe(ByVal swPlaneFeat As SldWorks.Feature, ByVal newName As String)
-    On Error Resume Next
-    If swPlaneFeat Is Nothing Or newName = "" Then Exit Sub
-    swPlaneFeat.Name = newName
-    On Error GoTo 0
-End Sub
-
-Public Function CreateQuarterPitchRefPlanes() As Boolean
-    Dim halfAngleRad As Double
-    Dim fullAngleRad As Double
-    Dim halfName As String
-    Dim fullName As String
-
-    CreateQuarterPitchRefPlanes = False
-    gHalfPitchPlaneName = ""
-    gFullPitchPlaneName = ""
-    Set swHalfPitchPlaneFeat = Nothing
-    Set swFullPitchPlaneFeat = Nothing
-
-    If GearGeom.numTeeth < 1 Then Exit Function
-    halfAngleRad = GearGeom.QuarterPitchAngleDeg * 2# * Pi / 180#
-    fullAngleRad = GearGeom.QuarterPitchAngleDeg * 4# * Pi / 180#
-    halfName = BuildGearPrefixName() & "_HalfPitchPlane"
-    fullName = BuildGearPrefixName() & "_FullPitchPlane"
-
-    DebugPrint "CreateQuarterPitchRefPlanes: half=" & Format(GearGeom.QuarterPitchAngleDeg * 2#, "0.####") & _
-        " deg full=" & Format(GearGeom.QuarterPitchAngleDeg * 4#, "0.####") & " deg"
-
-    Set swHalfPitchPlaneFeat = InsertAngledRefPlaneFromFrontAndAxis(halfAngleRad)
-    If swHalfPitchPlaneFeat Is Nothing Then
-        DebugPrint "CreateQuarterPitchRefPlanes FAIL: half-pitch plane"
-        Exit Function
-    End If
-    RenameRefPlaneFeatureSafe swHalfPitchPlaneFeat, halfName
-    gHalfPitchPlaneName = swHalfPitchPlaneFeat.Name
-
-    Set swFullPitchPlaneFeat = InsertAngledRefPlaneFromFrontAndAxis(fullAngleRad)
-    If swFullPitchPlaneFeat Is Nothing Then
-        DebugPrint "CreateQuarterPitchRefPlanes WARN: full-pitch plane failed; half plane kept"
-        CreateQuarterPitchRefPlanes = True
-        Exit Function
-    End If
-    RenameRefPlaneFeatureSafe swFullPitchPlaneFeat, fullName
-    gFullPitchPlaneName = swFullPitchPlaneFeat.Name
-
-    RebuildSWPart
-    DebugPrint "CreateQuarterPitchRefPlanes OK half=" & gHalfPitchPlaneName & " full=" & gFullPitchPlaneName
-    CreateQuarterPitchRefPlanes = True
-End Function
-
-Public Sub BlankGearConstructionFeatures()
-    On Error Resume Next
-    ExitActiveSketchIfAny
-    ClearSWSelection
-
-    If Not swLayoutSketchFeat Is Nothing Then
-        swLayoutSketchFeat.Select2 False, 0
-    ElseIf gLayoutSketchFeatName <> "" Then
-        swModelDocExt.SelectByID2 gLayoutSketchFeatName, "SKETCH", 0, 0, 0, False, 0, Nothing, 0
-    End If
-    If swSelMgr.GetSelectedObjectCount2(-1) > 0 Then swPart.BlankSketch
-
-    ClearSWSelection
-    If Not swHalfPitchPlaneFeat Is Nothing Then
-        swHalfPitchPlaneFeat.Select2 False, 0
-    ElseIf gHalfPitchPlaneName <> "" Then
-        swModelDocExt.SelectByID2 gHalfPitchPlaneName, "PLANE", 0, 0, 0, False, 0, Nothing, 0
-    End If
-    If Not swFullPitchPlaneFeat Is Nothing Then
-        swFullPitchPlaneFeat.Select2 True, 0
-    ElseIf gFullPitchPlaneName <> "" Then
-        swModelDocExt.SelectByID2 gFullPitchPlaneName, "PLANE", 0, 0, 0, True, 0, Nothing, 0
-    End If
-    If swSelMgr.GetSelectedObjectCount2(-1) > 0 Then swPart.BlankRefGeom
-
-    ClearSWSelection
-    DebugPrint "BlankGearConstructionFeatures OK"
-    On Error GoTo 0
-End Sub
-
-Public Sub ConstrainSketchSegmentColinearToRefPlane(ByVal swLine As SldWorks.SketchSegment, ByVal planeFeatName As String)
-    On Error Resume Next
-    If swLine Is Nothing Or planeFeatName = "" Then Exit Sub
-    ClearSWSelection
-    swLine.Select4 False, Nothing
-    swModelDocExt.SelectByID2 planeFeatName, "PLANE", 0, 0, 0, True, 0, Nothing, 0
-    swDoc.SketchAddConstraints "sgCOLINEAR"
-    ClearSWSelection
-    On Error GoTo 0
-End Sub
 
 Public Sub ConstrainTangentSketchSegments(ByVal swSeg1 As SldWorks.SketchSegment, ByVal swSeg2 As SldWorks.SketchSegment)
     On Error Resume Next
@@ -2862,8 +2712,6 @@ Public Sub CreateGearGlobalVariableEquations()
     AddOrUpdateGlobalEquation GearGlobalVarName("RimWidth"), Format(GearGeom.RimWidthMM, "0.####")
     AddOrUpdateGlobalEquation GearGlobalVarName("GapArcLength"), Format(GearGeom.GapArcLengthMM, "0.########")
     AddOrUpdateGlobalEquation GearGlobalVarName("GapRootFillet"), Format(GearGeom.GapRootFilletMM, "0.########")
-    AddOrUpdateGlobalEquation GearGlobalVarName("cQPA"), "360 / (4 * " & EqQuotedName(GearGlobalVarName("Teeth")) & ")"
-    AddOrUpdateGlobalEquation GearGlobalVarName("BaseRadius"), Format(GearGeom.BaseRadiusM, "0.########")
     DebugPrint "CreateGearGlobalVariableEquations: OK count=" & GearGeom.numTeeth
 End Sub
 
@@ -2978,25 +2826,12 @@ Private Sub LinkMcMasterGapSketchEquations()
     AddOrUpdateGlobalEquation GearGlobalVarName("GapRootFillet"), qGapArc & " * " & Format(GEAR_MCM_ROOT_FILLET_RATIO, "0.####")
 
     AddOrUpdateDimensionEquation GEAR_DIM_GAP_ARC & "@" & skName, qGapArc
-    AddOrUpdateDimensionEquation GEAR_DIM_GAP_PITCH_REF_ARC & "@" & skName, qGapArc
     AddOrUpdateDimensionEquation GEAR_DIM_GAP_HALF_ARC & "@" & skName, qGapArc & " / 2"
     AddOrUpdateDimensionEquation GEAR_DIM_GAP_ROOT_FILLET & "@" & skName, qRootFillet
     AddOrUpdateDimensionEquation GEAR_DIM_GAP_FLANK_ANGLE & "@" & skName, qPA
     AddOrUpdateDimensionEquation GEAR_DIM_GAP_FLANK_ARC_RADIUS & "@" & skName, _
         EqQuotedName(GearGlobalVarName("BaseRadius")) & " * TAN(" & qPA & " * PI / 180)"
     ' OD / pitch / root diameters are driven only by the layout sketch (converted edges in gap sketch)
-End Sub
-
-Private Sub LinkPitchPlaneEquations()
-    Dim qCQPA As String
-
-    qCQPA = EqQuotedName(GearGlobalVarName("cQPA"))
-    If gHalfPitchPlaneName <> "" Then
-        AddOrUpdateDimensionEquation "D1@" & gHalfPitchPlaneName, "2 * " & qCQPA
-    End If
-    If gFullPitchPlaneName <> "" Then
-        AddOrUpdateDimensionEquation "D1@" & gFullPitchPlaneName, "4 * " & qCQPA
-    End If
 End Sub
 
 Private Sub LinkMcMasterFilletEquation()
@@ -3030,7 +2865,6 @@ Public Sub LinkGearMcMasterEquations()
 
     LinkLayoutSketchEquations
     LinkRevolveAxisLayoutEquations
-    LinkPitchPlaneEquations
     LinkMcMasterGapSketchEquations
     TryLinkPatternInstanceEquation
     LinkMcMasterCutDepthEquation

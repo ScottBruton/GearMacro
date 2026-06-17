@@ -61,7 +61,7 @@ Private Sub LogRevolveSelectionDetails()
         If Not selObj Is Nothing Then
             If TypeOf selObj Is SldWorks.Feature Then
                 Set selFeat = selObj
-                DebugPrint "  sel(" & i & ") feat=" & selFeat.name & " type=" & selType & " mark=" & selMark
+                DebugPrint "  sel(" & i & ") feat=" & selFeat.Name & " type=" & selType & " mark=" & selMark
             Else
                 DebugPrint "  sel(" & i & ") type=" & selType & " mark=" & selMark
             End If
@@ -87,7 +87,7 @@ Private Function ResolveRevolveAxisFeature() As SldWorks.Feature
     End If
     If Not ResolveRevolveAxisFeature Is Nothing Then
         Set swGearAxisFeat = ResolveRevolveAxisFeature
-        gAxisName = ResolveRevolveAxisFeature.name
+        gAxisName = ResolveRevolveAxisFeature.Name
     End If
 End Function
 
@@ -103,7 +103,7 @@ Private Function RevolveSelectionHasFeature(ByVal featName As String) As Boolean
         If Not selObj Is Nothing Then
             If TypeOf selObj Is SldWorks.Feature Then
                 Set selFeat = selObj
-                If StrComp(selFeat.name, featName, vbTextCompare) = 0 Then
+                If StrComp(selFeat.Name, featName, vbTextCompare) = 0 Then
                     RevolveSelectionHasFeature = True
                     Exit Function
                 End If
@@ -137,13 +137,13 @@ Private Function SelectRevolveProfileAndRefAxis(ByVal swProfileSketchFeat As Sld
     selCount = swSelMgr.GetSelectedObjectCount2(-1)
     ' Do not trust Select2 return values — verify selection set by name/count only.
     SelectRevolveProfileAndRefAxis = (selCount = 2) And _
-        RevolveSelectionHasFeature(swProfileSketchFeat.name) And _
-        RevolveSelectionHasFeature(swAxisFeat.name)
+        RevolveSelectionHasFeature(swProfileSketchFeat.Name) And _
+        RevolveSelectionHasFeature(swAxisFeat.Name)
 
-    DebugPrint "SelectRevolveProfileAndRefAxis: profile=" & swProfileSketchFeat.name & _
-        " refAxis=" & swAxisFeat.name & " selCount=" & selCount & " ok=" & SelectRevolveProfileAndRefAxis
+    DebugPrint "SelectRevolveProfileAndRefAxis: profile=" & swProfileSketchFeat.Name & _
+        " refAxis=" & swAxisFeat.Name & " selCount=" & selCount & " ok=" & SelectRevolveProfileAndRefAxis
     If Not SelectRevolveProfileAndRefAxis Then
-        DebugPrint "SelectRevolveProfileAndRefAxis FAIL: expected " & swProfileSketchFeat.name & " + " & swAxisFeat.name
+        DebugPrint "SelectRevolveProfileAndRefAxis FAIL: expected " & swProfileSketchFeat.Name & " + " & swAxisFeat.Name
     End If
     LogRevolveSelectionDetails
 End Function
@@ -169,7 +169,7 @@ Private Sub AddColinearTotalAxialDimension(ByVal swLineHub As SldWorks.SketchSeg
         Set swDim = swDispDim.GetDimension2(0)
         If Not swDim Is Nothing Then
             swDim.SystemValue = totalWidthMM / MM_PER_M
-            swDim.name = dimName
+            swDim.Name = dimName
         End If
     End If
     ClearSWSelection
@@ -248,7 +248,7 @@ Private Function CreateRevolveProfileSketch(ByVal zBase As Double, ByVal hubW As
         ConstrainSketchSegmentColinearToSegment swLineRim, mSketchAxisLine
     End If
     AddLinearDimensionToLine swLineRim, GEAR_DIM_REVOLVE_RIM_WIDTH, GearGeom.RimWidthMM, zBase + rimW * 0.55, axisY + hubW * 0.35
-    AddColinearTotalAxialDimension swLineHub, swLineRim, GEAR_DIM_REVOLVE_TOTAL_AXIAL, GearGeom.widthMM, zBase, axisY + hubW * 0.55
+    AddColinearTotalAxialDimension swLineHub, swLineRim, GEAR_DIM_REVOLVE_TOTAL_AXIAL, GearGeom.WidthMM, zBase, axisY + hubW * 0.55
 
     swSketchManager.CreateLine zBase - hubW, boreY, 0, zBase - hubW, axisY + hubR, 0
     swSketchManager.CreateLine zBase - hubW, axisY + hubR, 0, zBase, axisY + hubR, 0
@@ -327,13 +327,13 @@ Public Function CreateRevolveBlank() As Boolean
         DebugPrint "CreateRevolveBlank: revolve feature not created"
         GoTo BlankFail
     End If
-    DebugPrint "CreateRevolveBlank: " & revolveMethod & " -> " & swRevolveFeat.name
+    DebugPrint "CreateRevolveBlank: " & revolveMethod & " -> " & swRevolveFeat.Name
 
     Set swAddendumExtrudeFeat = swRevolveFeat
     ClearSWSelection
     RebuildSWPart
 
-    DebugPrint "CreateRevolveBlank OK feat=" & swRevolveFeat.name & _
+    DebugPrint "CreateRevolveBlank OK feat=" & swRevolveFeat.Name & _
         " refAxis=" & gAxisName & " profileSk=" & gBlankSketchFeatName
     CreateRevolveBlank = True
     Exit Function
@@ -380,7 +380,7 @@ Public Function CreateMcMasterFillet() As Boolean
     End If
 
     RebuildSWPart
-    DebugPrint "CreateMcMasterFillet OK R=" & Format(filletR * MM_PER_M, "0.####") & " mm feat=" & swFilletFeat.name
+    DebugPrint "CreateMcMasterFillet OK R=" & Format(filletR * MM_PER_M, "0.####") & " mm feat=" & swFilletFeat.Name
     CreateMcMasterFillet = True
     Exit Function
 
@@ -388,5 +388,3 @@ FilletFail:
     DebugPrint "CreateMcMasterFillet WARN: " & Err.Description & " (non-fatal)"
     CreateMcMasterFillet = True
 End Function
-
-

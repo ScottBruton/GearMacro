@@ -5,7 +5,7 @@ Option Explicit
 ' =============================================================================
 ' Creates:
 '   - Sketch point   GearN_Center     (gear axis centre on Front plane)
-'   - Construction circles (OD, Pitch, Root, Hub, Shaft) concentric to GearN_Center
+'   - Construction circles (Base, OD, Pitch, Root, Hub, Shaft) concentric to GearN_Center
 '   - Dimensions: InvoluteGear_OD, PitchDia, RootDia, HubDia, ShaftDia
 '   - Driven only: InvoluteGear_LayoutCenterDist from prior gear's Gear(N-1)_Center
 '
@@ -16,6 +16,7 @@ Public Function CreateMasterLayoutSketch() As Boolean
     On Error GoTo LayoutFail
 
     Dim swCircles(1 To 5) As SldWorks.SketchSegment
+    Dim swBaseCircle As SldWorks.SketchSegment
     Dim swCenterPt As SldWorks.SketchPoint
     Dim labels(1 To 5) As String
     Dim diams(1 To 5) As Double
@@ -52,7 +53,15 @@ Public Function CreateMasterLayoutSketch() As Boolean
     ConstrainLayoutCenterPointForRole swCenterPt   ' coincident Origin OR dim from driving centre
     TryRenameSketchPoint swCenterPt, gLayoutCenterPointName
 
-    ' --- Construction circles (all concentric to GearN_Center) -------------------
+    ' --- Base circle (construction) ------------------------------------------------
+    Set swBaseCircle = swSketchManager.CreateCircle(cx, cy, 0, cx + GearGeom.BaseDiameterMM / MM_PER_M / 2#, cy, 0)
+    If swBaseCircle Is Nothing Then GoTo LayoutFail
+    swBaseCircle.ConstructionGeometry = True
+    ConstrainSketchPointConcentricToCircle swCenterPt, swBaseCircle
+    AddDiameterDimensionToCircle swBaseCircle, GEAR_DIM_LAYOUT_BASE, GearGeom.BaseDiameterMM
+    TryRenameSketchSegment swBaseCircle, BuildGearPrefixName() & "_Base"
+
+    ' --- Construction circles (OD, Pitch, Root, Hub, Shaft) ----------------------
     labels(1) = GEAR_DIM_LAYOUT_OD: diams(1) = GearGeom.AddendumDiameterMM
     labels(2) = GEAR_DIM_LAYOUT_PITCH: diams(2) = GearGeom.PitchDiameterMM
     labels(3) = GEAR_DIM_LAYOUT_ROOT: diams(3) = GearGeom.DedendumDiameterMM

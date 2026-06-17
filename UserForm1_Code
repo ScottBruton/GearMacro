@@ -30,7 +30,6 @@
 '
 '   tbHubDia         TextBox       Optional hub OD (mm); blank = 40% of pitch diameter
 '   tbShaftDia       TextBox       Optional bore/shaft dia (mm); blank = 10 mm
-'   optInvoluteFlank CheckBox      Optional: true involute gap flank (CreateEquationSpline2) instead of PA arc
 '
 
 Private Sub UserForm_Initialize()
@@ -44,7 +43,6 @@ Private Sub UserForm_Initialize()
 
     If ControlExists("optDrivingGear") Then optDrivingGear.Value = True
     If ControlExists("optExternalGear") Then optExternalGear.Value = True
-    If ControlExists("optInvoluteFlank") Then optInvoluteFlank.Value = False
     If ControlExists("tbMeshAngle") Then tbMeshAngle.Text = "0"
     SyncGearTypeFromForm
 

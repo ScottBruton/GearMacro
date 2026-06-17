@@ -45,7 +45,6 @@ Public Type GearGeometry
     GapArcLengthMM As Double
     GapHalfArcLengthMM As Double
     GapRootFilletMM As Double
-    QuarterPitchAngleDeg As Double
     IsInternal As Boolean
 End Type
 
@@ -66,10 +65,6 @@ Public swToothGapSketchFeat As SldWorks.Feature
 Public swToothCutFeat As SldWorks.Feature
 Public swPatternFeat As SldWorks.Feature
 Public swCombineFeat As SldWorks.Feature
-Public swHalfPitchPlaneFeat As SldWorks.Feature
-Public swFullPitchPlaneFeat As SldWorks.Feature
-Public swGapTipFilletFeat As SldWorks.Feature
-Public swGapRootFilletFeat As SldWorks.Feature
 
 Public Pi As Double
 Public boolstatus As Boolean
@@ -124,7 +119,6 @@ Sub main()
     GearTrainDrivingIsInternal = False
     GearTrainLayoutCenterDistanceMM = 0#
     GearGeom.IsInternal = False
-    GearGapFlankMode = GEAR_FLANK_PA_ARC
     Load UserForm1
     gbGearFormOpen = True
     UserForm1.Show vbModeless
@@ -158,8 +152,6 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
     GearGeom.ModuleMM = Module
     GearGeom.NumTeeth = NumTeeth
     GearGeom.WidthMM = Width
-
-    ReadGearGapFlankModeFromForm
 
     GearBuildStep "ValidateGearInputs"
     If Not ValidateGearInputsPublic(GearGeom.PressureAngleDeg, GearGeom.ModuleMM, GearGeom.NumTeeth, GearGeom.WidthMM) Then
@@ -295,12 +287,6 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
     End If
     GearBuildStepOk GetGearAxisName()
 
-    GearBuildStep "CreateQuarterPitchRefPlanes"
-    If Not CreateQuarterPitchRefPlanes() Then
-        DebugPrint "CreateQuarterPitchRefPlanes WARN: half/full pitch planes not created; gap sketch uses arc-length fallback"
-    End If
-    GearBuildStepOk GetHalfPitchPlaneName()
-
     GearBuildStep "CreateRevolveBlank"
     If Not CreateRevolveBlank() Then
         GearBuildStepFail
@@ -336,12 +322,6 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
     End If
     GearBuildStepOk swPatternFeat.Name & " instances=" & GearGeom.NumTeeth
 
-    GearBuildStep "CreateGap3DFillets"
-    If Not CreateGap3DFillets() Then
-        DebugPrint "CreateGap3DFillets WARN: 3D tip/root fillets skipped (non-fatal)"
-    End If
-    GearBuildStepOk
-
     GearBuildStep "RebuildAndValidate"
     If Not RebuildAndValidate() Then
         GearBuildStepFail
@@ -361,10 +341,6 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
 
     GearBuildStep "StoreGearMetadataOnPart"
     StoreGearMetadataOnPart
-    GearBuildStepOk
-
-    GearBuildStep "BlankGearConstructionFeatures"
-    BlankGearConstructionFeatures
     GearBuildStepOk
 
     If GearTrainRole = GEAR_ROLE_DRIVEN Then
