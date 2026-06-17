@@ -61,7 +61,6 @@ Public swRevolveAxisSketchFeat As SldWorks.Feature
 Public swRevolveProfileSketchFeat As SldWorks.Feature
 Public swRevolveFeat As SldWorks.Feature
 Public swAddendumExtrudeFeat As SldWorks.Feature
-Public swFilletFeat As SldWorks.Feature
 Public swToothGapSketchFeat As SldWorks.Feature
 Public swToothCutFeat As SldWorks.Feature
 Public swPatternFeat As SldWorks.Feature
@@ -302,13 +301,6 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
         GoTo GenFail
     End If
     GearBuildStepOk swRevolveFeat.Name
-
-    GearBuildStep "CreateMcMasterFillet"
-    If Not CreateMcMasterFillet() Then
-        GearBuildStepFail
-        GoTo GenFail
-    End If
-    GearBuildStepOk IIf(swFilletFeat Is Nothing, "(skipped)", swFilletFeat.Name)
 
     GearBuildStep "CreateToothGapSketch"
     If Not CreateToothGapSketch() Then

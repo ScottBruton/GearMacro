@@ -59,7 +59,6 @@ Public Const GEAR_DIM_GAP_HALF_ARC As String = "InvoluteGear_GapHalfArc"
 Public Const GEAR_DIM_GAP_ROOT_FILLET As String = "InvoluteGear_GapRootFillet"
 Public Const GEAR_DIM_GAP_FLANK_ANGLE As String = "InvoluteGear_GapFlankAngle"
 Public Const GEAR_DIM_GAP_FLANK_ARC_RADIUS As String = "InvoluteGear_GapFlankArcRadius"
-Public Const GEAR_DIM_FILLET As String = "InvoluteGear_Fillet"
 
 ' ApplyCoincidentRelation — entity kind for each side (A = first pick, B = second pick append)
 Public Const COINC_SEL_SKETCH_POINT As Long = 1       ' obj = SketchPoint
@@ -71,8 +70,6 @@ Public Const COINC_SEL_SEG_IN_SKETCH As Long = 6      ' segment by GetName insid
 Public Const COINC_SEL_LINE_ENDPOINT As Long = 7      ' obj = line SketchSegment; epIndex 0=start 1=end -> SketchPoint only
 
 Public Const GEAR_MCM_ROOT_FILLET_RATIO As Double = 0.0955
-Public Const GEAR_MCM_FILLET_OD_RATIO As Double = 0.01
-Public Const SW_SIMPLE_FILLET_CONST_RADIUS As Long = 0   ' swSimpleFilletType_e.swConstRadiusFillet
 Public Const GEAR_PROP_MODULE As String = "InvoluteGear_Module"
 Public Const GEAR_PROP_TEETH As String = "InvoluteGear_Teeth"
 Public Const GEAR_PROP_PRESSURE As String = "InvoluteGear_PressureAngle"
@@ -252,7 +249,6 @@ Public Sub ResetGearBuildFeatureRefs()
     Set swRevolveProfileSketchFeat = Nothing
     Set swRevolveFeat = Nothing
     Set swAddendumExtrudeFeat = Nothing
-    Set swFilletFeat = Nothing
     Set swToothCutFeat = Nothing
     Set swPatternFeat = Nothing
     Set swCombineFeat = Nothing
@@ -291,6 +287,22 @@ Public Sub CaptureSolidBodyCountBeforeGearBuild()
     If IsArray(vBodies) Then gGearSolidBodyCountBefore = UBound(vBodies) - LBound(vBodies) + 1
     On Error GoTo 0
 End Sub
+
+Public Function CountSolidBodiesInPart() As Long
+    Dim vBodies As Variant
+    CountSolidBodiesInPart = 0
+    On Error Resume Next
+    If swPart Is Nothing Then Exit Function
+    vBodies = swPart.GetBodies2(swSolidBody, False)
+    If IsEmpty(vBodies) Then Exit Function
+    If IsArray(vBodies) Then CountSolidBodiesInPart = UBound(vBodies) - LBound(vBodies) + 1
+    On Error GoTo 0
+End Function
+
+Public Function PartNeedsCutFeatureScope() As Boolean
+    PartNeedsCutFeatureScope = (gGearSolidBodyCountBefore > 0)
+    If Not PartNeedsCutFeatureScope Then PartNeedsCutFeatureScope = (CountSolidBodiesInPart() > 1)
+End Function
 
 Private Function HasGearBodyNamePrefix(ByVal bodyName As String) As Boolean
     Dim i As Long
@@ -362,10 +374,6 @@ End Sub
 Public Function GetCurrentGearIndex() As Long
     If gCurrentGearIndex < 1 Then gCurrentGearIndex = 1
     GetCurrentGearIndex = gCurrentGearIndex
-End Function
-
-Public Function PartNeedsCutFeatureScope() As Boolean
-    PartNeedsCutFeatureScope = (gGearSolidBodyCountBefore > 0)
 End Function
 
 ' Solid body from the current addendum boss (Face2.GetBody â€” reliable; GetBodies2 order is not creation order)
@@ -1653,38 +1661,40 @@ Private Function GetLayoutCenterSketchPoint() As SldWorks.SketchPoint
     On Error GoTo 0
 End Function
 
-Private Sub DeleteAllRefAxisFeaturesExcept(Optional ByVal keepName As String = "")
-    Dim ft As SldWorks.Feature
-    Dim names() As String
-    Dim i As Long
-    Dim n As Long
+Private Sub DeleteRefAxisFeatureByName(ByVal axisName As String)
+    If axisName = "" Then Exit Sub
+    On Error Resume Next
+    ClearSWSelection
+    If swModelDocExt.SelectByID2(axisName, "AXIS", 0, 0, 0, False, 0, Nothing, 0) Then
+        swDoc.EditDelete
+    ElseIf swModelDocExt.SelectByID2(axisName, "REFAXIS", 0, 0, 0, False, 0, Nothing, 0) Then
+        swDoc.EditDelete
+    End If
+    ClearSWSelection
+    On Error GoTo 0
+End Sub
 
-    n = 0
-    ReDim names(0 To 0)
-    Set ft = swPart.FirstFeature
-    Do While Not ft Is Nothing
-        If FeatureIsRefAxis(ft) Then
-            If keepName = "" Or StrComp(ft.name, keepName, vbTextCompare) <> 0 Then
-                ReDim Preserve names(0 To n)
-                names(n) = ft.name
-                n = n + 1
-            End If
-        End If
-        Set ft = ft.GetNextFeature
+' Remove stale ref axes for the gear currently being built only (never other gears in the part).
+Private Sub DeleteCurrentGearOrphanRefAxes()
+    DeleteRefAxisFeatureByName BuildGearRefAxisName()
+    DeleteRefAxisFeatureByName BuildGearAxisFeatureName()
+End Sub
+
+' Roll back ref axes inserted after axisCountBefore (failed InsertAxis2); never delete driving/base axes.
+Private Sub DeleteRefAxesAddedSinceCount(ByVal axisCountBefore As Long)
+    Dim swAxis As SldWorks.Feature
+    Dim guard As Long
+
+    guard = 0
+    Do While CountRefAxisFeatures() > axisCountBefore And guard < 20
+        Set swAxis = FindLastRefAxisFeature()
+        If swAxis Is Nothing Then Exit Do
+        If GearTrainDrivingAxisName <> "" And _
+            StrComp(swAxis.name, GearTrainDrivingAxisName, vbTextCompare) = 0 Then Exit Do
+        DeleteRefAxisFeatureByName swAxis.name
+        guard = guard + 1
     Loop
-
-    For i = 0 To n - 1
-        On Error Resume Next
-        ClearSWSelection
-        If swModelDocExt.SelectByID2(names(i), "AXIS", 0, 0, 0, False, 0, Nothing, 0) Then
-            swDoc.EditDelete
-        ElseIf swModelDocExt.SelectByID2(names(i), "REFAXIS", 0, 0, 0, False, 0, Nothing, 0) Then
-            swDoc.EditDelete
-        End If
-        ClearSWSelection
-        On Error GoTo 0
-    Next i
-    If n > 0 Then RebuildSWPart
+    If guard > 0 Then RebuildSWPart
 End Sub
 
 ' InsertAxis2: Front Plane first, then sketch point (SW API order).
@@ -1719,7 +1729,7 @@ Private Function InsertSingleRefAxisFrontPlaneAndSketchPoint(ByVal swPt As SldWo
         InsertSingleRefAxisFrontPlaneAndSketchPoint = True
         DebugPrint "InsertSingleRefAxisFrontPlaneAndSketchPoint OK (count " & nBefore & " -> " & nAfter & ")"
     Else
-        If nAfter > nBefore Then DeleteAllRefAxisFeaturesExcept
+        If nAfter > nBefore Then DeleteRefAxesAddedSinceCount nBefore
         DebugPrint "InsertSingleRefAxisFrontPlaneAndSketchPoint FAIL (count " & nBefore & " -> " & nAfter & " selOk=" & selOk & ")"
     End If
 End Function
@@ -1752,7 +1762,7 @@ Private Function InsertSingleRefAxisFrontPlaneAndOrigin() As Boolean
         InsertSingleRefAxisFrontPlaneAndOrigin = True
         DebugPrint "InsertSingleRefAxisFrontPlaneAndOrigin OK (count " & nBefore & " -> " & nAfter & ")"
     Else
-        If nAfter > nBefore Then DeleteAllRefAxisFeaturesExcept
+        If nAfter > nBefore Then DeleteRefAxesAddedSinceCount nBefore
         DebugPrint "InsertSingleRefAxisFrontPlaneAndOrigin FAIL (count " & nBefore & " -> " & nAfter & " selOk=" & selOk & ")"
     End If
 End Function
@@ -1773,7 +1783,6 @@ Public Function CreateGearRefAxisFromLayoutSketchPoint() As Boolean
 
     Set existingAxis = FindRefAxisFeatureByName(axisName)
     If Not existingAxis Is Nothing Then
-        DeleteAllRefAxisFeaturesExcept axisName
         Set swGearAxisFeat = existingAxis
         ApplyGearAxisFeatureName swGearAxisFeat, axisName
         CreateGearRefAxisFromLayoutSketchPoint = True
@@ -1781,10 +1790,7 @@ Public Function CreateGearRefAxisFromLayoutSketchPoint() As Boolean
         Exit Function
     End If
 
-    If CountRefAxisFeatures() > 0 Then
-        DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: removing orphan ref axis(es) from prior failed run"
-        DeleteAllRefAxisFeaturesExcept
-    End If
+    DeleteCurrentGearOrphanRefAxes
 
     If swFrontPlaneFeat Is Nothing Then
         If Not ResolveAndStoreFrontPlane() Then
@@ -1816,7 +1822,7 @@ Public Function CreateGearRefAxisFromLayoutSketchPoint() As Boolean
         CreateGearRefAxisFromLayoutSketchPoint = True
         DebugPrint "CreateGearRefAxisFromLayoutSketchPoint OK: " & gAxisName & " (count=" & CountRefAxisFeatures() & ")"
     Else
-        DeleteAllRefAxisFeaturesExcept
+        DeleteRefAxesAddedSinceCount axisCountBefore
         DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: ref axis not committed (count=" & CountRefAxisFeatures() & ")"
     End If
 End Function
@@ -3099,21 +3105,6 @@ Private Sub LinkMcMasterGapSketchEquations()
     ' OD / pitch / root diameters are driven only by the layout sketch (converted edges in gap sketch)
 End Sub
 
-Private Sub LinkMcMasterFilletEquation()
-    Dim featName As String
-    Dim qM As String
-    Dim qZ As String
-    If swFilletFeat Is Nothing Then Exit Sub
-    featName = swFilletFeat.name
-    qM = EqQuotedName(GearGlobalVarName("Module"))
-    qZ = EqQuotedName(GearGlobalVarName("Teeth"))
-    If GearGeom.IsInternal Then
-        AddOrUpdateDimensionEquation GEAR_DIM_FILLET & "@" & featName, qM & " * (" & qZ & " - 2) * " & Format(GEAR_MCM_FILLET_OD_RATIO, "0.####")
-    Else
-        AddOrUpdateDimensionEquation GEAR_DIM_FILLET & "@" & featName, qM & " * (" & qZ & " + 2) * " & Format(GEAR_MCM_FILLET_OD_RATIO, "0.####")
-    End If
-End Sub
-
 Private Sub LinkMcMasterCutDepthEquation()
     Dim featName As String
     If swToothCutFeat Is Nothing Then Exit Sub
@@ -3133,7 +3124,6 @@ Public Sub LinkGearMcMasterEquations()
     LinkMcMasterGapSketchEquations
     TryLinkPatternInstanceEquation
     LinkMcMasterCutDepthEquation
-    LinkMcMasterFilletEquation
 
     Set swEqnMgr = swPart.GetEquationMgr
     If Not swEqnMgr Is Nothing Then swEqnMgr.AutomaticSolve = True

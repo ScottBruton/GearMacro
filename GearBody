@@ -7,7 +7,6 @@ Option Explicit
 '   1. CreateRevolveProfileSketch     ->  GearN_Body       (Right Plane)
 '        - L-section profile + width dimensions
 '   2. SelectRevolveProfileAndRefAxis + FeatureRevolve2  ->  Revolve1 (solid blank)
-'   3. CreateMcMasterFillet           ->  Fillet1 (OD fillet, non-fatal if skipped)
 '
 ' Prerequisite (Involute1 / GearLib): GearN_Layout, GearN_Center, GearN_Axis already exist
 ' =============================================================================
@@ -203,7 +202,7 @@ Private Function CreateRevolveBossFromSelection(ByRef methodUsed As String) As S
         False, False, _
         0.01, 0.01, _
         0, 0#, 0#, _
-        True, True, True)
+        False, False, True)
     If Not CreateRevolveBossFromSelection Is Nothing Then
         methodUsed = "FeatureRevolve2"
         swSelMgr.EnableContourSelection = False
@@ -213,6 +212,28 @@ Private Function CreateRevolveBossFromSelection(ByRef methodUsed As String) As S
 
     DebugPrint "CreateRevolveBossFromSelection failed: " & lastErr & " " & lastDesc
     NoteGearBuildError "Revolve boss failed: " & lastErr & " " & lastDesc
+End Function
+
+Private Function SetRevolveFeatureNoMerge(ByVal swRevolveFeat As SldWorks.Feature) As Boolean
+    Dim swDef As Object
+
+    SetRevolveFeatureNoMerge = False
+    If swRevolveFeat Is Nothing Then Exit Function
+    On Error Resume Next
+    Set swDef = swRevolveFeat.GetDefinition
+    If swDef Is Nothing Then Exit Function
+    If Not swDef.AccessSelections(swPart, Nothing) Then Exit Function
+    swDef.Merge = False
+    swDef.MergeResult = False
+    SetRevolveFeatureNoMerge = swRevolveFeat.ModifyDefinition(swDef, swPart, Nothing)
+    swDef.ReleaseSelectionAccess
+    If SetRevolveFeatureNoMerge Then
+        DebugPrint "SetRevolveFeatureNoMerge OK: " & swRevolveFeat.Name
+    Else
+        DebugPrint "SetRevolveFeatureNoMerge failed: " & Err.Number & " " & Err.Description
+        Err.Clear
+    End If
+    On Error GoTo 0
 End Function
 
 ' --- SOLIDWORKS: GearN_Body (Right Plane) --------------------------------------
@@ -352,6 +373,7 @@ Public Function CreateRevolveBlank() As Boolean
     End If
     DebugPrint "CreateRevolveBlank: " & revolveMethod & " -> " & swRevolveFeat.Name
 
+    SetRevolveFeatureNoMerge swRevolveFeat
     Set swAddendumExtrudeFeat = swRevolveFeat
     ClearSWSelection
     RebuildSWPart
@@ -366,48 +388,4 @@ BlankFail:
     If gLastGearBuildError = "" Then NoteGearBuildError "CreateRevolveBlank failed (revolve feature not created)"
     DebugPrint "CreateRevolveBlank FAIL: " & gLastGearBuildError
     CreateRevolveBlank = False
-End Function
-
-' --- SOLIDWORKS: Fillet1 (optional) --------------------------------------------
-' OD fillet R = OD x 0.01; skipped without error if no edges are selected.
-Public Function CreateMcMasterFillet() As Boolean
-    On Error GoTo FilletFail
-
-    Dim filletR As Double
-    Dim swFeatData As Object
-
-    CreateMcMasterFillet = False
-    DebugPrint "CreateMcMasterFillet: begin R=" & Format(GearGeom.AddendumDiameterMM * GEAR_MCM_FILLET_OD_RATIO, "0.####") & " mm"
-    filletR = GearGeom.AddendumDiameterMM * GEAR_MCM_FILLET_OD_RATIO / MM_PER_M
-
-    ClearSWSelection
-    swModelDocExt.SelectByID2 "", "EDGE", 0, 0, 0, False, 0, Nothing, 0
-
-    On Error Resume Next
-    Set swFeatData = swFeatMgr.CreateDefinition(swFeatureNameID_e.swFmFillet)
-    If swFeatData Is Nothing Then
-        DebugPrint "CreateMcMasterFillet WARN: fillet skipped (no edges pre-selected)"
-        CreateMcMasterFillet = True
-        Exit Function
-    End If
-    swFeatData.Radius = filletR
-    swFeatData.DefaultRadius = filletR
-    swFeatData.Type = SW_SIMPLE_FILLET_CONST_RADIUS
-    Set swFilletFeat = swFeatMgr.CreateFeature(swFeatData)
-    On Error GoTo FilletFail
-
-    If swFilletFeat Is Nothing Then
-        DebugPrint "CreateMcMasterFillet WARN: fillet feature not created (non-fatal)"
-        CreateMcMasterFillet = True
-        Exit Function
-    End If
-
-    RebuildSWPart
-    DebugPrint "CreateMcMasterFillet OK R=" & Format(filletR * MM_PER_M, "0.####") & " mm feat=" & swFilletFeat.Name
-    CreateMcMasterFillet = True
-    Exit Function
-
-FilletFail:
-    DebugPrint "CreateMcMasterFillet WARN: " & Err.Description & " (non-fatal)"
-    CreateMcMasterFillet = True
 End Function

@@ -481,7 +481,7 @@ Public Function CutExtrudeToothGap() As Boolean
         GoTo CutFail
     End If
 
-    If PartNeedsCutFeatureScope() Then
+    If Not GetCurrentGearSolidBody() Is Nothing Then
         SetCutFeatureScopeToCurrentGearBody swToothCutFeat
     End If
 
