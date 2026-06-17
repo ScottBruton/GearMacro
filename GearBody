@@ -18,7 +18,7 @@ Private Sub ResetSketchAxisLineRef()
     Set mSketchAxisLine = Nothing
 End Sub
 
-' Opens Right Plane sketch and converts GearN_Axis to a construction line in the sketch.
+' Opens revolve-plane sketch (Right or GearN_RevolvePlane) and converts GearN_Axis to a construction line.
 Private Function BeginRightPlaneSketchWithRefAxis() As Boolean
     BeginRightPlaneSketchWithRefAxis = False
     ResetSketchAxisLineRef
@@ -236,26 +236,42 @@ Private Function CreateRevolveProfileSketch(ByVal zBase As Double, ByVal hubW As
     axisY = GetSketchAxisRadialY()
     boreY = axisY + shaftR
     DebugPrint "CreateRevolveProfileSketch: " & profileSkName & " axisY=" & Format(axisY * MM_PER_M, "0.###") & _
-        " boreY=" & Format(boreY * MM_PER_M, "0.###") & " mm"
+        " boreY=" & Format(boreY * MM_PER_M, "0.###") & " hubW=" & Format(hubW * MM_PER_M, "0.###") & " mm"
 
-    Set swLineHub = swSketchManager.CreateCenterLine(zBase - hubW, axisY, 0, zBase, axisY, 0)
-    Set swLineRim = swSketchManager.CreateCenterLine(zBase, axisY, 0, zBase + rimW, axisY, 0)
-    If swLineHub Is Nothing Or swLineRim Is Nothing Then GoTo ProfileFail
-    swLineHub.ConstructionGeometry = True
-    swLineRim.ConstructionGeometry = True
-    If Not mSketchAxisLine Is Nothing Then
-        ConstrainSketchSegmentColinearToSegment swLineHub, mSketchAxisLine
-        ConstrainSketchSegmentColinearToSegment swLineRim, mSketchAxisLine
+    If hubW <= 0.0000000001 Then
+        Set swLineRim = swSketchManager.CreateCenterLine(zBase, axisY, 0, zBase + rimW, axisY, 0)
+        If swLineRim Is Nothing Then GoTo ProfileFail
+        swLineRim.ConstructionGeometry = True
+        If Not mSketchAxisLine Is Nothing Then
+            ConstrainSketchSegmentColinearToSegment swLineRim, mSketchAxisLine
+        End If
+        AddLinearDimensionToLine swLineRim, GEAR_DIM_REVOLVE_RIM_WIDTH, GearGeom.RimWidthMM, zBase + rimW * 0.55, axisY + odR * 0.35
+
+        swSketchManager.CreateLine zBase, boreY, 0, zBase, axisY + shaftR, 0
+        swSketchManager.CreateLine zBase, axisY + shaftR, 0, zBase, axisY + odR, 0
+        swSketchManager.CreateLine zBase, axisY + odR, 0, zBase + rimW, axisY + odR, 0
+        swSketchManager.CreateLine zBase + rimW, axisY + odR, 0, zBase + rimW, boreY, 0
+        swSketchManager.CreateLine zBase + rimW, boreY, 0, zBase, boreY, 0
+    Else
+        Set swLineHub = swSketchManager.CreateCenterLine(zBase - hubW, axisY, 0, zBase, axisY, 0)
+        Set swLineRim = swSketchManager.CreateCenterLine(zBase, axisY, 0, zBase + rimW, axisY, 0)
+        If swLineHub Is Nothing Or swLineRim Is Nothing Then GoTo ProfileFail
+        swLineHub.ConstructionGeometry = True
+        swLineRim.ConstructionGeometry = True
+        If Not mSketchAxisLine Is Nothing Then
+            ConstrainSketchSegmentColinearToSegment swLineHub, mSketchAxisLine
+            ConstrainSketchSegmentColinearToSegment swLineRim, mSketchAxisLine
+        End If
+        AddLinearDimensionToLine swLineRim, GEAR_DIM_REVOLVE_RIM_WIDTH, GearGeom.RimWidthMM, zBase + rimW * 0.55, axisY + hubW * 0.35
+        AddColinearTotalAxialDimension swLineHub, swLineRim, GEAR_DIM_REVOLVE_TOTAL_AXIAL, GearGeom.WidthMM, zBase, axisY + hubW * 0.55
+
+        swSketchManager.CreateLine zBase - hubW, boreY, 0, zBase - hubW, axisY + hubR, 0
+        swSketchManager.CreateLine zBase - hubW, axisY + hubR, 0, zBase, axisY + hubR, 0
+        swSketchManager.CreateLine zBase, axisY + hubR, 0, zBase, axisY + odR, 0
+        swSketchManager.CreateLine zBase, axisY + odR, 0, zBase + rimW, axisY + odR, 0
+        swSketchManager.CreateLine zBase + rimW, axisY + odR, 0, zBase + rimW, boreY, 0
+        swSketchManager.CreateLine zBase + rimW, boreY, 0, zBase - hubW, boreY, 0
     End If
-    AddLinearDimensionToLine swLineRim, GEAR_DIM_REVOLVE_RIM_WIDTH, GearGeom.RimWidthMM, zBase + rimW * 0.55, axisY + hubW * 0.35
-    AddColinearTotalAxialDimension swLineHub, swLineRim, GEAR_DIM_REVOLVE_TOTAL_AXIAL, GearGeom.WidthMM, zBase, axisY + hubW * 0.55
-
-    swSketchManager.CreateLine zBase - hubW, boreY, 0, zBase - hubW, axisY + hubR, 0
-    swSketchManager.CreateLine zBase - hubW, axisY + hubR, 0, zBase, axisY + hubR, 0
-    swSketchManager.CreateLine zBase, axisY + hubR, 0, zBase, axisY + odR, 0
-    swSketchManager.CreateLine zBase, axisY + odR, 0, zBase + rimW, axisY + odR, 0
-    swSketchManager.CreateLine zBase + rimW, axisY + odR, 0, zBase + rimW, boreY, 0
-    swSketchManager.CreateLine zBase + rimW, boreY, 0, zBase - hubW, boreY, 0
 
     swSketchManager.InsertSketch True
     Set swRevolveProfileSketchFeat = FindLastSketchFeature()
@@ -308,6 +324,13 @@ Public Function CreateRevolveBlank() As Boolean
     If swGearAxisFeat Is Nothing Then
         NoteGearBuildError "CreateRevolveBlank: could not resolve ref axis feature"
         GoTo BlankFail
+    End If
+
+    If GearNeedsLocalRevolvePlane() Then
+        If GetOrCreateGearRevolvePlaneFeat() Is Nothing Then
+            NoteGearBuildError "CreateRevolveBlank: could not create " & BuildGearPrefixName() & "_RevolvePlane"
+            GoTo BlankFail
+        End If
     End If
 
     If Not CreateRevolveProfileSketch(zBase, hubW, rimW, shaftR, hubR, odR) Then GoTo BlankFail

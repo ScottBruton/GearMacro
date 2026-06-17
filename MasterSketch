@@ -65,7 +65,7 @@ Public Function CreateMasterLayoutSketch() As Boolean
     labels(1) = GEAR_DIM_LAYOUT_OD: diams(1) = GearGeom.AddendumDiameterMM
     labels(2) = GEAR_DIM_LAYOUT_PITCH: diams(2) = GearGeom.PitchDiameterMM
     labels(3) = GEAR_DIM_LAYOUT_ROOT: diams(3) = GearGeom.DedendumDiameterMM
-    labels(4) = GEAR_DIM_LAYOUT_HUB: diams(4) = GearGeom.HubDiameterMM
+    labels(4) = GEAR_DIM_LAYOUT_HUB: diams(4) = IIf(GearGeom.UseHub, GearGeom.HubDiameterMM, GearGeom.ShaftDiameterMM)
     labels(5) = GEAR_DIM_LAYOUT_SHAFT: diams(5) = GearGeom.ShaftDiameterMM
 
     For i = 1 To 5

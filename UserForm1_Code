@@ -30,6 +30,7 @@
 '
 '   tbHubDia         TextBox       Optional hub OD (mm); blank = 40% of pitch diameter
 '   tbShaftDia       TextBox       Optional bore/shaft dia (mm); blank = 10 mm
+'   chkUseHub        CheckBox      Caption "Use hub" — default unchecked; stacked gears never use hub
 '
 
 Private Sub UserForm_Initialize()
@@ -40,6 +41,7 @@ Private Sub UserForm_Initialize()
     tbWidth.Text = "10"
     If ControlExists("tbHubDia") Then tbHubDia.Text = ""
     If ControlExists("tbShaftDia") Then tbShaftDia.Text = ""
+    If ControlExists("chkUseHub") Then chkUseHub.Value = False
 
     If ControlExists("optDrivingGear") Then optDrivingGear.Value = True
     If ControlExists("optExternalGear") Then optExternalGear.Value = True
@@ -373,6 +375,38 @@ Private Sub TextBox3_Change()
     UpdateTrainCenterDistance
 End Sub
 
+Private Sub SetFormControlEnabled(ByVal ctrlName As String, ByVal enabled As Boolean)
+    Dim ctrl As Object
+    Set ctrl = FindControlByName(Me, ctrlName)
+    If ctrl Is Nothing Then Exit Sub
+    On Error Resume Next
+    ctrl.Enabled = enabled
+    On Error GoTo 0
+End Sub
+
+Private Sub UpdateHubControlsUI()
+    Dim showHub As Boolean
+    Dim useHub As Boolean
+    On Error Resume Next
+    showHub = GetOptionValue("optDrivingGear") Or GetOptionValue("optDrivenGear")
+    SetFormControlVisible "chkUseHub", showHub
+    SetFormControlVisible "tbHubDia", showHub
+    If ControlExists("lblHubDia") Then SetFormControlVisible "lblHubDia", showHub
+    useHub = showHub And GetFormCheckboxOrDefault("chkUseHub", False)
+    SetFormControlEnabled "tbHubDia", useHub
+    On Error GoTo 0
+End Sub
+
+Private Function GetFormCheckboxOrDefault(ByVal ctrlName As String, ByVal defaultVal As Boolean) As Boolean
+    Dim ctrl As Object
+    GetFormCheckboxOrDefault = defaultVal
+    Set ctrl = FindControlByName(Me, ctrlName)
+    If ctrl Is Nothing Then Exit Function
+    On Error Resume Next
+    GetFormCheckboxOrDefault = CBool(ctrl.Value)
+    On Error GoTo 0
+End Function
+
 Private Sub UpdateGearRoleUI()
     Dim showDrivenLayout As Boolean
     Dim showBaseGearPicker As Boolean
@@ -419,7 +453,12 @@ Private Sub UpdateGearRoleUI()
         tbModule.BackColor = vbWhite
         tbPressureAngle.BackColor = vbWhite
     End If
+    UpdateHubControlsUI
     On Error GoTo 0
+End Sub
+
+Private Sub chkUseHub_Click()
+    UpdateHubControlsUI
 End Sub
 
 Private Function GetDrivingGearBodyCombo() As Object
@@ -639,6 +678,10 @@ Private Sub cbGenerate_Click()
             MsgBox "Choose the base gear from the list (open that part first, then Refresh list).", vbExclamation
             Exit Sub
         End If
+        If Not ValidateStackedBaseGearHasNoHub() Then
+            MsgBox gLastGearBuildError, vbExclamation, "Stacked Gear"
+            Exit Sub
+        End If
     ElseIf GetOptionValue("optDrivenGear") Then
         GearTrainRole = GEAR_ROLE_DRIVEN
         If GearTrainDrivingPartTitle = "" Then
@@ -656,6 +699,7 @@ Private Sub cbGenerate_Click()
         GearTrainRole = GEAR_ROLE_DRIVING
         GearTrainLayoutCenterDistanceMM = 0#
     End If
+    UpdateHubControlsUI
 
     ' --- validation (same as before) ---
     ErrorMsg = ""

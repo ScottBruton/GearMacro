@@ -81,6 +81,7 @@ Public Const GEAR_PROP_PITCH_DIA As String = "InvoluteGear_PitchDiameter"
 Public Const GEAR_PROP_ADDENDUM_DIA As String = "InvoluteGear_AddendumDiameter"
 Public Const GEAR_PROP_IS_INTERNAL As String = "InvoluteGear_IsInternal"
 Public Const GEAR_PROP_GEAR_INDEX As String = "InvoluteGear_Index"
+Public Const GEAR_PROP_USE_HUB As String = "InvoluteGear_UseHub"
 Public Const GEAR_AXIS_NAME_SUFFIX As String = " Axis"
 
 Public Sub ClearLastGearBuildError()
@@ -165,6 +166,20 @@ Public Sub ClearSWSelection()
     swDoc.ClearSelection2 True
     On Error GoTo 0
 End Sub
+
+Private Function SelectForCirPatternMark(ByVal swObj As Object, ByVal mark As Long, ByVal append As Boolean) As Boolean
+    Dim sd As SldWorks.SelectData
+    On Error Resume Next
+    SelectForCirPatternMark = False
+    If swObj Is Nothing Then Exit Function
+    Set sd = swSelMgr.CreateSelectData
+    If Not sd Is Nothing Then
+        sd.Mark = mark
+        SelectForCirPatternMark = swObj.Select4(append, sd)
+    End If
+    If Not SelectForCirPatternMark Then SelectForCirPatternMark = swObj.Select2(append, mark)
+    On Error GoTo 0
+End Function
 
 Public Sub RebuildSWPart()
     swDoc.EditRebuild3
@@ -393,6 +408,151 @@ Private Function GetFormDoubleOrDefault(ByVal ctrlName As String, ByVal defaultV
     On Error GoTo 0
 End Function
 
+Private Function GetFormCheckboxOrDefault(ByVal ctrlName As String, ByVal defaultVal As Boolean) As Boolean
+    Dim c As Object
+    On Error Resume Next
+    GetFormCheckboxOrDefault = defaultVal
+    Set c = UserForm1.Controls(ctrlName)
+    If Not c Is Nothing Then GetFormCheckboxOrDefault = CBool(c.Value)
+    On Error GoTo 0
+End Function
+
+Private Sub SyncUseHubFromForm()
+    If GearTrainRole = GEAR_ROLE_STACKED Then
+        GearGeom.UseHub = False
+    Else
+        GearGeom.UseHub = GetFormCheckboxOrDefault("chkUseHub", False)
+    End If
+End Sub
+
+Public Function GearNeedsLocalRevolvePlane() As Boolean
+    If GearTrainRole = GEAR_ROLE_DRIVING Then
+        GearNeedsLocalRevolvePlane = (Abs(gSketchOffsetXM) > 0.00001 Or Abs(gSketchOffsetYM) > 0.00001)
+    Else
+        GearNeedsLocalRevolvePlane = True
+    End If
+End Function
+
+' Plane parallel to Right Plane through GearN_Axis (Right Plane + ref axis selected).
+Private Function InsertGearRevolvePlaneParallelToRight(ByVal swRight As SldWorks.Feature) As SldWorks.Feature
+    Dim swPlane As SldWorks.Feature
+    Dim selCount As Long
+
+    Set InsertGearRevolvePlaneParallelToRight = Nothing
+    If swRight Is Nothing Then Exit Function
+
+    If swGearAxisFeat Is Nothing Then
+        Set swGearAxisFeat = FindRefAxisFeatureByName(gAxisName)
+    End If
+    If swGearAxisFeat Is Nothing And gAxisName <> "" Then
+        DebugPrint "InsertGearRevolvePlaneParallelToRight: gear ref axis missing (" & gAxisName & ")"
+        Exit Function
+    End If
+
+    ExitActiveSketchIfAny
+    ClearSWSelection
+    RebuildSWPart
+
+    swRight.Select False
+    If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then
+        swModelDocExt.SelectByID2 swRight.name, "PLANE", 0, 0, 0, False, 0, Nothing, 0
+    End If
+    If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then
+        swModelDocExt.SelectByID2 "Right Plane", "PLANE", 0, 0, 0, False, 0, Nothing, 0
+    End If
+    If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then
+        DebugPrint "InsertGearRevolvePlaneParallelToRight: could not select Right Plane"
+        Exit Function
+    End If
+
+    If Not SelectGearRefAxisWithMark(1, True) Then
+        DebugPrint "InsertGearRevolvePlaneParallelToRight: could not select gear ref axis " & gAxisName
+        Exit Function
+    End If
+
+    selCount = swSelMgr.GetSelectedObjectCount2(-1)
+    DebugPrint "InsertGearRevolvePlaneParallelToRight: selCount=" & selCount & " axis=" & gAxisName
+
+    On Error Resume Next
+    Err.Clear
+    ' swRefPlaneReferenceConstraint_Parallel = 4; marks 0 = Right Plane, 1 = axis
+    Set swPlane = swFeatMgr.InsertRefPlane(1, 0, 4, 0#, False, 0)
+    If swPlane Is Nothing And Err.Number <> 0 Then
+        DebugPrint "InsertGearRevolvePlaneParallelToRight InsertRefPlane err: " & Err.Number & " " & Err.Description
+        Err.Clear
+    End If
+    On Error GoTo 0
+    Set InsertGearRevolvePlaneParallelToRight = swPlane
+End Function
+
+' Revolve profile plane: Right Plane at origin; driven/stacked get GearN_RevolvePlane parallel to Right through GearN_Axis.
+Public Function GetOrCreateGearRevolvePlaneFeat() As SldWorks.Feature
+    Dim swRight As SldWorks.Feature
+    Dim planeName As String
+    Dim swPlane As SldWorks.Feature
+
+    Set GetOrCreateGearRevolvePlaneFeat = Nothing
+    Set swRight = GetRefPlaneByIndex(3)
+    If swRight Is Nothing Then
+        DebugPrint "GetOrCreateGearRevolvePlaneFeat: no Right RefPlane"
+        Exit Function
+    End If
+
+    If Not GearNeedsLocalRevolvePlane() Then
+        Set GetOrCreateGearRevolvePlaneFeat = swRight
+        DebugPrint "GetOrCreateGearRevolvePlaneFeat: using Right Plane (gear at origin)"
+        Exit Function
+    End If
+
+    planeName = BuildGearPrefixName() & "_RevolvePlane"
+    Set swPlane = swPart.FeatureByName(planeName)
+    If Not swPlane Is Nothing Then
+        Set GetOrCreateGearRevolvePlaneFeat = swPlane
+        DebugPrint "GetOrCreateGearRevolvePlaneFeat: reuse " & planeName
+        Exit Function
+    End If
+
+    Set swPlane = InsertGearRevolvePlaneParallelToRight(swRight)
+    If swPlane Is Nothing Then
+        DebugPrint "GetOrCreateGearRevolvePlaneFeat: InsertRefPlane parallel to Right through axis failed"
+        Exit Function
+    End If
+
+    RenameSketchFeatureSafe swPlane, planeName
+    RebuildSWPart
+    Set GetOrCreateGearRevolvePlaneFeat = swPlane
+    DebugPrint "GetOrCreateGearRevolvePlaneFeat: created " & planeName & " through " & gAxisName & _
+        " offset mm=(" & Format(gSketchOffsetXM * MM_PER_M, "0.###") & ", " & Format(gSketchOffsetYM * MM_PER_M, "0.###") & ")"
+End Function
+
+Public Function BeginSketchOnPlaneFeat(ByVal swPlaneFeat As SldWorks.Feature) As Boolean
+    BeginSketchOnPlaneFeat = False
+    If swPlaneFeat Is Nothing Then Exit Function
+    ExitActiveSketchIfAny
+
+    On Error Resume Next
+    swPlaneFeat.Select False
+    If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then
+        swModelDocExt.SelectByID2 swPlaneFeat.name, "PLANE", 0, 0, 0, False, 0, Nothing, 0
+    End If
+    On Error GoTo 0
+
+    If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then
+        DebugPrint "BeginSketchOnPlaneFeat: could not select " & swPlaneFeat.name
+        Exit Function
+    End If
+
+    swSketchManager.InsertSketch True
+    If swSketchManager.ActiveSketch Is Nothing Then
+        DebugPrint "BeginSketchOnPlaneFeat: InsertSketch failed on " & swPlaneFeat.name
+        Exit Function
+    End If
+
+    BeginSketchOnPlaneFeat = True
+    DebugPrint "BeginSketchOnPlaneFeat OK: " & swPlaneFeat.name & _
+        IIf(GearNeedsLocalRevolvePlane(), " (local revolve plane)", " (Right Plane)")
+End Function
+
 Public Function ReadGearInputsFromForm() As Boolean
     On Error GoTo ReadFail
 
@@ -463,6 +623,11 @@ Public Sub CalculateGearGeometry()
     z = GearGeom.numTeeth
     alphaRad = GearGeom.pressureAngleDeg * Pi / 180#
 
+    On Error Resume Next
+    GearGeom.HubDiameterMM = GetFormDoubleOrDefault("tbHubDia", 0#)
+    GearGeom.ShaftDiameterMM = GetFormDoubleOrDefault("tbShaftDia", 0#)
+    On Error GoTo 0
+
     GearGeom.pitchDiameterMM = GearGeom.moduleMM * z
     GearGeom.PitchRadiusMM = GearGeom.pitchDiameterMM / 2#
     GearGeom.BaseDiameterMM = GearGeom.pitchDiameterMM * Cos(alphaRad)
@@ -487,11 +652,18 @@ Public Sub CalculateGearGeometry()
         GearGeom.HubDiameterMM = GearGeom.DedendumDiameterMM - 2# * GearGeom.moduleMM
     End If
 
+    SyncUseHubFromForm
+    If Not GearGeom.UseHub Then
+        GearGeom.HubDiameterMM = GearGeom.ShaftDiameterMM
+        GearGeom.HubWidthMM = 0#
+        GearGeom.RimWidthMM = GearGeom.widthMM
+    Else
+        GearGeom.RimWidthMM = GearGeom.widthMM / 2#
+        GearGeom.HubWidthMM = GearGeom.widthMM / 2#
+    End If
+
     GearGeom.HubRadiusMM = GearGeom.HubDiameterMM / 2#
     GearGeom.ShaftRadiusMM = GearGeom.ShaftDiameterMM / 2#
-
-    GearGeom.RimWidthMM = GearGeom.widthMM / 2#
-    GearGeom.HubWidthMM = GearGeom.widthMM / 2#
 
     GearGeom.CircularPitchMM = Pi * GearGeom.moduleMM
     GearGeom.AngularPitchDeg = 360# / z
@@ -515,6 +687,7 @@ Public Sub CalculateGearGeometry()
         " Da=" & Format(GearGeom.AddendumDiameterMM, "0.###") & _
         " Dd=" & Format(GearGeom.DedendumDiameterMM, "0.###") & _
         " Hub=" & Format(GearGeom.HubDiameterMM, "0.###") & _
+        " useHub=" & GearGeom.UseHub & _
         " Shaft=" & Format(GearGeom.ShaftDiameterMM, "0.###") & _
         " gapArc=" & Format(GearGeom.GapArcLengthMM, "0.####") & " mm"
 End Sub
@@ -626,34 +799,15 @@ Public Function BeginSketchOnFrontPlane() As Boolean
 End Function
 
 Public Function BeginSketchOnRightPlane() As Boolean
-    Dim swRight As SldWorks.Feature
+    Dim swPlane As SldWorks.Feature
 
-    BeginSketchOnRightPlane = False
-    ExitActiveSketchIfAny
-    Set swRight = GetRefPlaneByIndex(3)
-    If swRight Is Nothing Then
-        DebugPrint "BeginSketchOnRightPlane: no right RefPlane"
+    Set swPlane = GetOrCreateGearRevolvePlaneFeat()
+    If swPlane Is Nothing Then
+        DebugPrint "BeginSketchOnRightPlane FAIL: GetOrCreateGearRevolvePlaneFeat returned Nothing"
+        BeginSketchOnRightPlane = False
         Exit Function
     End If
-
-    On Error Resume Next
-    swRight.Select False
-    If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then
-        swModelDocExt.SelectByID2 swRight.name, "PLANE", 0, 0, 0, False, 0, Nothing, 0
-    End If
-    If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then
-        swModelDocExt.SelectByID2 "Right Plane", "PLANE", 0, 0, 0, False, 0, Nothing, 0
-    End If
-    On Error GoTo 0
-
-    swSketchManager.InsertSketch True
-    If swSketchManager.ActiveSketch Is Nothing Then
-        DebugPrint "BeginSketchOnRightPlane: InsertSketch failed"
-        Exit Function
-    End If
-
-    BeginSketchOnRightPlane = True
-    DebugPrint "BeginSketchOnRightPlane OK"
+    BeginSketchOnRightPlane = BeginSketchOnPlaneFeat(swPlane)
 End Function
 
 Public Sub ExitActiveSketchIfAny()
@@ -713,17 +867,62 @@ Public Function GetGearAxisCenterOnSketchM(ByRef xM As Double, ByRef yM As Doubl
 End Function
 
 Private Function SelectGearRefAxisForSketchConvert() As Boolean
-    SelectGearRefAxisForSketchConvert = False
-    On Error Resume Next
     ClearSWSelection
-    If gAxisName <> "" Then
-        SelectGearRefAxisForSketchConvert = swModelDocExt.SelectByID2(gAxisName, "AXIS", 0, 0, 0, False, 0, Nothing, 0)
-        If Not SelectGearRefAxisForSketchConvert Then
-            SelectGearRefAxisForSketchConvert = swModelDocExt.SelectByID2(gAxisName, "REFAXIS", 0, 0, 0, False, 0, Nothing, 0)
+    SelectGearRefAxisForSketchConvert = SelectGearRefAxisWithMark(0, False)
+End Function
+
+' Append/prepend gear ref axis with selection mark. Do not trust Select2 return — verify sel count increased.
+Private Function SelectGearRefAxisWithMark(ByVal selMark As Long, ByVal append As Boolean) As Boolean
+    Dim axisName As String
+    Dim docTitle As String
+    Dim fullName As String
+    Dim selBefore As Long
+    Dim selAfter As Long
+
+    SelectGearRefAxisWithMark = False
+    On Error Resume Next
+
+    If swGearAxisFeat Is Nothing Then
+        axisName = gAxisName
+        If axisName = "" Then axisName = BuildGearRefAxisName()
+        Set swGearAxisFeat = FindRefAxisFeatureByName(axisName)
+    End If
+
+    axisName = gAxisName
+    If axisName = "" And Not swGearAxisFeat Is Nothing Then axisName = swGearAxisFeat.Name
+
+    selBefore = swSelMgr.GetSelectedObjectCount2(-1)
+
+    If Not swGearAxisFeat Is Nothing Then
+        swGearAxisFeat.Select2 append, selMark
+    End If
+
+    selAfter = swSelMgr.GetSelectedObjectCount2(-1)
+    If selAfter <= selBefore And axisName <> "" Then
+        swModelDocExt.SelectByID2 axisName, "AXIS", 0, 0, 0, append, selMark, Nothing, 0
+        selAfter = swSelMgr.GetSelectedObjectCount2(-1)
+    End If
+    If selAfter <= selBefore And axisName <> "" Then
+        swModelDocExt.SelectByID2 axisName, "REFAXIS", 0, 0, 0, append, selMark, Nothing, 0
+        selAfter = swSelMgr.GetSelectedObjectCount2(-1)
+    End If
+    If selAfter <= selBefore And axisName <> "" Then
+        docTitle = swDoc.GetTitle
+        If docTitle <> "" Then
+            fullName = axisName & "@" & docTitle
+            swModelDocExt.SelectByID2 fullName, "AXIS", 0, 0, 0, append, selMark, Nothing, 0
+            selAfter = swSelMgr.GetSelectedObjectCount2(-1)
+            If selAfter <= selBefore Then
+                swModelDocExt.SelectByID2 fullName, "REFAXIS", 0, 0, 0, append, selMark, Nothing, 0
+                selAfter = swSelMgr.GetSelectedObjectCount2(-1)
+            End If
         End If
     End If
-    If Not SelectGearRefAxisForSketchConvert And Not swGearAxisFeat Is Nothing Then
-        SelectGearRefAxisForSketchConvert = swGearAxisFeat.Select2(False, 0)
+
+    SelectGearRefAxisWithMark = (selAfter > selBefore)
+    If Not SelectGearRefAxisWithMark Then
+        DebugPrint "SelectGearRefAxisWithMark FAIL: axis=" & axisName & " mark=" & selMark & _
+            " append=" & append & " selBefore=" & selBefore & " selAfter=" & selAfter
     End If
     On Error GoTo 0
 End Function
@@ -1283,6 +1482,7 @@ End Function
 ' Position GearN_Center in the layout sketch (Sketch1 / GearN_Layout):
 '   Driving  -> coincident to Origin
 '   Driven   -> distance dimension from prior gear's Gear(N-1)_Center
+'   Stacked  -> coincident to base gear's Gear(N-1)_Center
 Public Sub ConstrainLayoutCenterPointForRole(ByVal swCenterPt As SldWorks.SketchPoint)
     Dim drvPtId As String
     Dim cMM As Double
@@ -1325,6 +1525,28 @@ Public Sub ConstrainLayoutCenterPointForRole(ByVal swCenterPt As SldWorks.Sketch
         AddDistanceDimensionBetweenSelectedPoints cMM, GEAR_DIM_LAYOUT_CENTER_DIST, dimX, dimY
         DebugPrint "ConstrainLayoutCenterPointForRole: driven centre dim from " & drvPtId & _
             " C=" & Format(cMM, "0.###") & " mm"
+        ClearSWSelection
+    ElseIf GearTrainRole = GEAR_ROLE_STACKED Then
+        drvPtId = BuildDrivingGearLayoutCenterSelectId()
+        If drvPtId = "" Then
+            DebugPrint "ConstrainLayoutCenterPointForRole: stacked centre left at layout coords (no base point id)"
+            Exit Sub
+        End If
+        ClearSWSelection
+        boolstatus = swModelDocExt.SelectByID2(drvPtId, "EXTSKETCHPOINT", 0, 0, 0, False, 0, Nothing, 0)
+        If Not boolstatus Then
+            DebugPrint "ConstrainLayoutCenterPointForRole: could not select base layout centre " & drvPtId
+            ClearSWSelection
+            Exit Sub
+        End If
+        boolstatus = swCenterPt.Select4(True, Nothing)
+        If Not boolstatus Then
+            DebugPrint "ConstrainLayoutCenterPointForRole: could not select stacked layout centre point"
+            ClearSWSelection
+            Exit Sub
+        End If
+        swDoc.SketchAddConstraints "sgCOINCIDENT"
+        DebugPrint "ConstrainLayoutCenterPointForRole: stacked centre coincident to " & drvPtId
         ClearSWSelection
     End If
     On Error GoTo 0
@@ -2352,6 +2574,7 @@ Public Sub StoreGearMetadataOnPart()
     SetPartCustomProperty GEAR_PROP_ADDENDUM_DIA, CStr(GearGeom.AddendumDiameterMM)
     SetPartCustomProperty GEAR_PROP_IS_INTERNAL, IIf(GearGeom.IsInternal, "1", "0")
     SetPartCustomProperty GEAR_PROP_GEAR_INDEX, CStr(GetCurrentGearIndex())
+    SetPartCustomProperty GEAR_PROP_USE_HUB, IIf(GearGeom.UseHub, "1", "0")
     DebugPrint "StoreGearMetadataOnPart OK"
     On Error GoTo 0
 End Sub
@@ -2408,6 +2631,45 @@ Public Function ReadGearIsInternalFromDoc(ByVal swSourceDoc As SldWorks.ModelDoc
     If useVal = "" Then useVal = LCase$(Trim$(valOut))
     ReadGearIsInternalFromDoc = (useVal = "1" Or useVal = "true" Or useVal = "yes" Or useVal = "internal")
     On Error GoTo 0
+End Function
+
+Public Function ReadGearUseHubFromDoc(ByVal swSourceDoc As SldWorks.ModelDoc2) As Boolean
+    Dim swExt As SldWorks.ModelDocExtension
+    Dim valOut As String
+    Dim resolvedValOut As String
+    Dim useVal As String
+    On Error Resume Next
+    ReadGearUseHubFromDoc = True
+    If swSourceDoc Is Nothing Then Exit Function
+    Set swExt = swSourceDoc.Extension
+    valOut = ""
+    resolvedValOut = ""
+    swExt.CustomPropertyManager("").Get4 GEAR_PROP_USE_HUB, False, valOut, resolvedValOut
+    useVal = LCase$(Trim$(resolvedValOut))
+    If useVal = "" Then useVal = LCase$(Trim$(valOut))
+    If useVal = "" Then Exit Function
+    ReadGearUseHubFromDoc = (useVal = "1" Or useVal = "true" Or useVal = "yes")
+    On Error GoTo 0
+End Function
+
+Public Function ValidateStackedBaseGearHasNoHub() As Boolean
+    Dim swPartDoc As SldWorks.ModelDoc2
+
+    ValidateStackedBaseGearHasNoHub = False
+    If GearTrainDrivingPartTitle = "" Then
+        NoteGearBuildError "Stacked gear: no base gear selected."
+        Exit Function
+    End If
+    Set swPartDoc = FindOpenPartDocumentByTitle(GearTrainDrivingPartTitle)
+    If swPartDoc Is Nothing Then
+        NoteGearBuildError "Stacked gear: could not open base gear part."
+        Exit Function
+    End If
+    If ReadGearUseHubFromDoc(swPartDoc) Then
+        NoteGearBuildError "Stacked gear requires a hubless base gear. Uncheck ""Use hub"" when building the base gear, or pick a hubless gear."
+        Exit Function
+    End If
+    ValidateStackedBaseGearHasNoHub = True
 End Function
 
 Public Function ReadGearMetadataFromDoc(ByVal swSourceDoc As SldWorks.ModelDoc2, ByRef moduleMM As Double, ByRef numTeeth As Long, _
@@ -2710,6 +2972,7 @@ Public Sub CreateGearGlobalVariableEquations()
     AddOrUpdateGlobalEquation GearGlobalVarName("HubDiameter"), Format(GearGeom.HubDiameterMM, "0.####")
     AddOrUpdateGlobalEquation GearGlobalVarName("ShaftDiameter"), Format(GearGeom.ShaftDiameterMM, "0.####")
     AddOrUpdateGlobalEquation GearGlobalVarName("RimWidth"), Format(GearGeom.RimWidthMM, "0.####")
+    AddOrUpdateGlobalEquation GearGlobalVarName("HubWidth"), Format(GearGeom.HubWidthMM, "0.####")
     AddOrUpdateGlobalEquation GearGlobalVarName("GapArcLength"), Format(GearGeom.GapArcLengthMM, "0.########")
     AddOrUpdateGlobalEquation GearGlobalVarName("GapRootFillet"), Format(GearGeom.GapRootFilletMM, "0.########")
     DebugPrint "CreateGearGlobalVariableEquations: OK count=" & GearGeom.numTeeth
@@ -2806,7 +3069,9 @@ Private Sub LinkRevolveAxisLayoutEquations()
     qRimW = EqQuotedName(GearGlobalVarName("RimWidth"))
     qWidth = EqQuotedName(GearGlobalVarName("Width"))
     AddOrUpdateDimensionEquation GEAR_DIM_REVOLVE_RIM_WIDTH & "@" & skName, qRimW
-    AddOrUpdateDimensionEquation GEAR_DIM_REVOLVE_TOTAL_AXIAL & "@" & skName, qWidth
+    If GearGeom.UseHub Then
+        AddOrUpdateDimensionEquation GEAR_DIM_REVOLVE_TOTAL_AXIAL & "@" & skName, qWidth
+    End If
 End Sub
 
 Private Sub LinkMcMasterGapSketchEquations()

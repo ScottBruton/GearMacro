@@ -34,6 +34,7 @@ Public Type GearGeometry
     WidthM As Double
     HubDiameterMM As Double
     HubRadiusMM As Double
+    UseHub As Boolean
     ShaftDiameterMM As Double
     ShaftRadiusMM As Double
     RimWidthMM As Double
@@ -119,6 +120,7 @@ Sub main()
     GearTrainDrivingIsInternal = False
     GearTrainLayoutCenterDistanceMM = 0#
     GearGeom.IsInternal = False
+    GearGeom.UseHub = False
     Load UserForm1
     gbGearFormOpen = True
     UserForm1.Show vbModeless
@@ -176,6 +178,13 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
             End If
             GearBuildStepOk
         Else
+            GearBuildStep "ValidateStackedBaseGearHasNoHub"
+            If Not ValidateStackedBaseGearHasNoHub() Then
+                GearBuildStepFail
+                MsgBox gLastGearBuildError, vbExclamation, "Stacked Gear"
+                Exit Sub
+            End If
+            GearBuildStepOk
             GearBuildStep "ApplyStackedGearInputsFromBaseGear"
             If Not ApplyStackedGearInputsFromBaseGear() Then
                 GearBuildStepFail
