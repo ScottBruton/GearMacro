@@ -74,6 +74,20 @@ Private Function ResolveRevolveAxisFeature() As SldWorks.Feature
     Dim axisName As String
 
     Set ResolveRevolveAxisFeature = Nothing
+
+    If GearTrainRole = GEAR_ROLE_STACKED And GearTrainDrivingAxisName <> "" Then
+        Set ResolveRevolveAxisFeature = FindRefAxisFeatureByName(GearTrainDrivingAxisName)
+        If Not ResolveRevolveAxisFeature Is Nothing Then
+            Set swGearAxisFeat = ResolveRevolveAxisFeature
+            gAxisName = GearTrainDrivingAxisName
+            Exit Function
+        End If
+        If TryReuseStackedBaseGearAxis() Then
+            Set ResolveRevolveAxisFeature = swGearAxisFeat
+            Exit Function
+        End If
+    End If
+
     axisName = BuildGearRefAxisName()
 
     If Not swGearAxisFeat Is Nothing Then
@@ -81,7 +95,7 @@ Private Function ResolveRevolveAxisFeature() As SldWorks.Feature
     ElseIf axisName <> "" Then
         Set ResolveRevolveAxisFeature = FindRefAxisFeatureByName(axisName)
     End If
-    If ResolveRevolveAxisFeature Is Nothing Then
+    If ResolveRevolveAxisFeature Is Nothing And GearTrainRole <> GEAR_ROLE_STACKED Then
         Set ResolveRevolveAxisFeature = FindLastRefAxisFeature()
     End If
     If Not ResolveRevolveAxisFeature Is Nothing Then

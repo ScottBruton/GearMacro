@@ -434,11 +434,7 @@ Private Sub SyncUseHubFromForm()
 End Sub
 
 Public Function GearNeedsLocalRevolvePlane() As Boolean
-    If GearTrainRole = GEAR_ROLE_DRIVING Then
-        GearNeedsLocalRevolvePlane = (Abs(gSketchOffsetXM) > 0.00001 Or Abs(gSketchOffsetYM) > 0.00001)
-    Else
-        GearNeedsLocalRevolvePlane = True
-    End If
+    GearNeedsLocalRevolvePlane = (Abs(gSketchOffsetXM) > 0.00001 Or Abs(gSketchOffsetYM) > 0.00001)
 End Function
 
 ' Plane parallel to Right Plane through GearN_Axis (Right Plane + ref axis selected).
@@ -493,7 +489,7 @@ Private Function InsertGearRevolvePlaneParallelToRight(ByVal swRight As SldWorks
     Set InsertGearRevolvePlaneParallelToRight = swPlane
 End Function
 
-' Revolve profile plane: Right Plane at origin; driven/stacked get GearN_RevolvePlane parallel to Right through GearN_Axis.
+' Revolve profile plane: Right Plane when gear centre is at origin; else GearN_RevolvePlane parallel to Right through gear axis.
 Public Function GetOrCreateGearRevolvePlaneFeat() As SldWorks.Feature
     Dim swRight As SldWorks.Feature
     Dim planeName As String
@@ -1779,6 +1775,18 @@ Public Function CreateGearRefAxisFromLayoutSketchPoint() As Boolean
 
     CreateGearRefAxisFromLayoutSketchPoint = False
     DebugPrint "CreateGearRefAxisFromLayoutSketchPoint: single-axis path (GearLib paste check)"
+
+    If GearTrainRole = GEAR_ROLE_STACKED Then
+        If TryReuseStackedBaseGearAxis() Then
+            CreateGearRefAxisFromLayoutSketchPoint = True
+            DebugPrint "CreateGearRefAxisFromLayoutSketchPoint OK (stacked reuses selected axis): " & gAxisName
+            Exit Function
+        End If
+        DebugPrint "CreateGearRefAxisFromLayoutSketchPoint FAIL: stacked gear needs base axis """ & _
+            BuildGearAxisFeatureNameFromBodyLabel(GearTrainDrivingBodyLabel) & """"
+        Exit Function
+    End If
+
     axisName = BuildGearRefAxisName()
 
     Set existingAxis = FindRefAxisFeatureByName(axisName)
@@ -1931,17 +1939,30 @@ End Sub
 ' GEARPARTSETUP
 ' =============================================================================
 
-Private Function TryReuseStackedBaseGearAxis() As Boolean
+Public Function TryReuseStackedBaseGearAxis() As Boolean
     Dim ft As SldWorks.Feature
+    Dim axisName As String
 
     TryReuseStackedBaseGearAxis = False
-    If GearTrainDrivingAxisName = "" Then Exit Function
-    Set ft = FindRefAxisFeatureByName(GearTrainDrivingAxisName)
-    If ft Is Nothing Then Exit Function
+    If GearTrainRole <> GEAR_ROLE_STACKED Then Exit Function
+
+    axisName = GearTrainDrivingAxisName
+    If axisName = "" And GearTrainDrivingBodyLabel <> "" Then
+        axisName = BuildGearAxisFeatureNameFromBodyLabel(GearTrainDrivingBodyLabel)
+        GearTrainDrivingAxisName = axisName
+    End If
+    If axisName = "" Then Exit Function
+
+    Set ft = FindRefAxisFeatureByName(axisName)
+    If ft Is Nothing Then
+        DebugPrint "TryReuseStackedBaseGearAxis: axis not found: " & axisName
+        Exit Function
+    End If
+
     Set swGearAxisFeat = ft
     gAxisName = ft.name
     TryReuseStackedBaseGearAxis = True
-    DebugPrint "Stacked gear reuses base ref axis: " & gAxisName
+    DebugPrint "Stacked gear reuses selected base ref axis: " & gAxisName
 End Function
 
 Private Function CreateGearAxis() As Boolean
@@ -2517,6 +2538,16 @@ End Sub
 Public Sub NameGearAxisForCurrentBuild()
     Dim axisName As String
     DebugPrint "NameGearAxisForCurrentBuild: begin"
+
+    If GearTrainRole = GEAR_ROLE_STACKED Then
+        If TryReuseStackedBaseGearAxis() Then
+            DebugPrint "NameGearAxisForCurrentBuild: stacked keeps selected axis " & gAxisName
+        Else
+            DebugPrint "NameGearAxisForCurrentBuild: stacked — selected base axis not found"
+        End If
+        Exit Sub
+    End If
+
     axisName = BuildGearAxisFeatureName()
     If axisName = "" Then
         DebugPrint "NameGearAxisForCurrentBuild: empty axis name"
@@ -2545,6 +2576,10 @@ Public Sub SyncDrivingGearAxisReference(ByVal swPartDoc As SldWorks.ModelDoc2)
         DebugPrint "Driving gear axis not found (generate/rename driving gear first): " & GearTrainDrivingAxisName
     Else
         DebugPrint "Driving gear axis reference: " & GearTrainDrivingAxisName
+        If GearTrainRole = GEAR_ROLE_STACKED Then
+            Set swGearAxisFeat = ft
+            gAxisName = ft.name
+        End If
     End If
 End Sub
 

@@ -51,6 +51,7 @@ Private Sub UserForm_Initialize()
     InitMfgMethodCombo
     InitMfgControlTooltips
 
+    EnsureStackedGearOptionControl
     UpdateGearRoleUI
     On Error GoTo 0
 
@@ -407,13 +408,61 @@ Private Function GetFormCheckboxOrDefault(ByVal ctrlName As String, ByVal defaul
     On Error GoTo 0
 End Function
 
+Private Function IsStackedGearRoleSelected() As Boolean
+    IsStackedGearRoleSelected = GetOptionValue("optStackedGear")
+End Function
+
+' Creates optStackedGear at runtime if missing from the form designer (GroupName must match Driving/Driven).
+Private Sub EnsureStackedGearOptionControl()
+    Dim opt As Object
+    Dim refOpt As Object
+    Dim parent As Object
+
+    On Error Resume Next
+    If ControlExists("optStackedGear") Then
+        SetFormControlVisible "optStackedGear", True
+        Exit Sub
+    End If
+
+    Set refOpt = FindControlByName(Me, "optDrivenGear")
+    If refOpt Is Nothing Then Set refOpt = FindControlByName(Me, "optDrivingGear")
+    If refOpt Is Nothing Then Exit Sub
+
+    Set parent = refOpt.Parent
+    If parent Is Nothing Then Set parent = Me
+
+    Set opt = parent.Controls.Add("Forms.OptionButton.1", "optStackedGear", True)
+    If opt Is Nothing Then Exit Sub
+    opt.Caption = "Stacked"
+    opt.GroupName = "GearRole"
+    opt.Left = refOpt.Left
+    opt.Top = refOpt.Top + refOpt.Height + 6
+    opt.Width = refOpt.Width
+    opt.Height = refOpt.Height
+    opt.Visible = True
+    On Error GoTo 0
+End Sub
+
+Private Sub SyncGearRoleFromOptions()
+    On Error Resume Next
+    If IsStackedGearRoleSelected() Then
+        GearTrainRole = GEAR_ROLE_STACKED
+    ElseIf GetOptionValue("optDrivenGear") Then
+        GearTrainRole = GEAR_ROLE_DRIVEN
+    Else
+        GearTrainRole = GEAR_ROLE_DRIVING
+    End If
+    UpdateGearRoleUI
+    On Error GoTo 0
+End Sub
+
 Private Sub UpdateGearRoleUI()
     Dim showDrivenLayout As Boolean
     Dim showBaseGearPicker As Boolean
     On Error Resume Next
 
     showDrivenLayout = GetOptionValue("optDrivenGear")
-    showBaseGearPicker = showDrivenLayout Or GetOptionValue("optStackedGear") Or (GearTrainRole = GEAR_ROLE_STACKED)
+    showBaseGearPicker = showDrivenLayout Or IsStackedGearRoleSelected() Or (GearTrainRole = GEAR_ROLE_STACKED)
 
     ' Frame must stay visible for Stacked when picker controls live inside fraDrivenGear (child Visible is ignored if parent is hidden)
     SetFormControlVisible "fraDrivenGear", showBaseGearPicker
@@ -600,21 +649,29 @@ Private Sub optInternalGear_Click()
 End Sub
 
 Private Sub optDrivingGear_Click()
-    GearTrainRole = GEAR_ROLE_DRIVING
-    UpdateGearRoleUI
+    SyncGearRoleFromOptions
     UpdateGearCalculations
 End Sub
 
 Private Sub optDrivenGear_Click()
-    GearTrainRole = GEAR_ROLE_DRIVEN
-    UpdateGearRoleUI
+    SyncGearRoleFromOptions
     UpdateGearCalculations
 End Sub
 
 Private Sub optStackedGear_Click()
-    GearTrainRole = GEAR_ROLE_STACKED
-    UpdateGearRoleUI
+    SyncGearRoleFromOptions
     UpdateGearCalculations
+End Sub
+
+Private Sub UserForm_MouseUp(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    ' Runtime-created optStackedGear has no Click handler — sync role after any mouse-up on the form.
+    If ControlExists("optStackedGear") Then
+        If IsStackedGearRoleSelected() And GearTrainRole <> GEAR_ROLE_STACKED Then
+            SyncGearRoleFromOptions
+        ElseIf Not IsStackedGearRoleSelected() And GearTrainRole = GEAR_ROLE_STACKED Then
+            SyncGearRoleFromOptions
+        End If
+    End If
 End Sub
 
 Private Sub cboDrivingGearBody_Change()
@@ -669,7 +726,7 @@ Private Sub cbGenerate_Click()
     Dim Width As Double
     Dim ErrorMsg As String
 
-    If GetOptionValue("optStackedGear") Then
+    If IsStackedGearRoleSelected() Then
         GearTrainRole = GEAR_ROLE_STACKED
         If GearTrainDrivingPartTitle = "" Then
             ApplyDrivingGearFromComboSelection
