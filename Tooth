@@ -27,12 +27,23 @@ Public Function GetGapSketchFeatName() As String
     GetGapSketchFeatName = mGapSketchFeatName
 End Function
 
+' Midpoint angle on the shorter arc between two Atn2 angles (avoids long-arc wrap).
+Private Function AverageAngleShortArc(ByVal angA As Double, ByVal angB As Double) As Double
+    Dim da As Double
+    da = angB - angA
+    If da > Pi Then da = da - 2# * Pi
+    If da < -Pi Then da = da + 2# * Pi
+    AverageAngleShortArc = angA + da * 0.5#
+End Function
+
 ' Builds one closed tooth-gap profile from involute parameters (metres, radians).
 Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Double, _
     ByVal z As Long, ByVal pa As Double, ByVal rb As Double, ByVal ra As Double, ByVal rf As Double) As Boolean
 
     Dim toothAngle As Double
-    Dim halfToothAngle As Double
+    Dim halfAngularPitch As Double
+    Dim gapCenter As Double
+    Dim halfSpace As Double
     Dim invPA As Double
     Dim rotA As Double
     Dim rotB As Double
@@ -84,10 +95,19 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
     If ra <= rb Then Exit Function
 
     toothAngle = 2# * Pi / CDbl(z)
-    halfToothAngle = Pi / (2# * CDbl(z))
+    halfAngularPitch = Pi / (2# * CDbl(z))
+    gapCenter = Pi / CDbl(z)
     invPA = Tan(pa) - pa
-    rotA = halfToothAngle + invPA
-    rotB = toothAngle - rotA
+    halfSpace = halfAngularPitch - invPA
+    If halfSpace <= 0# Then
+        ' Fine teeth (N > pi/(2*inv(alpha)) ~106 @ 20 deg PA): inv exceeds half pitch — use equal tooth/space.
+        DebugPrint "DrawInvoluteToothGapSketch: fine teeth clamp z=" & z & " pa=" & Format(pa * 180# / Pi, "0.##") & _
+            " deg halfSpace=" & Format(halfSpace, "0.######") & " -> " & Format(halfAngularPitch, "0.######") & " rad"
+        halfSpace = halfAngularPitch
+    End If
+    ' flankA = CCW flank (smaller angle), flankB = CW flank (larger angle) — same convention for all tooth counts
+    rotA = gapCenter - halfSpace
+    rotB = gapCenter + halfSpace
 
     If rf >= rb Then
         involuteStartRadius = rf
@@ -145,7 +165,7 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
     ' 3-point arc with midpoint on the short OD span (CreateArc direction flag wraps the long way).
     angOuterA = Atn2(aOuterY - cy, aOuterX - cx)
     angOuterB = Atn2(bOuterY - cy, bOuterX - cx)
-    angOuterMid = (angOuterA + angOuterB) * 0.5#
+    angOuterMid = AverageAngleShortArc(angOuterA, angOuterB)
     xOuterMid = cx + ra * Cos(angOuterMid)
     yOuterMid = cy + ra * Sin(angOuterMid)
     Set outerArc = swSketchManager.Create3PointArc(aOuterX, aOuterY, 0#, bOuterX, bOuterY, 0#, xOuterMid, yOuterMid, 0#)
@@ -155,7 +175,7 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
     End If
 
     If Not needsRootConnector Then
-        angRootMid = (Atn2(aStartY - cy, aStartX - cx) + Atn2(bStartY - cy, bStartX - cx)) * 0.5#
+        angRootMid = AverageAngleShortArc(Atn2(aStartY - cy, aStartX - cx), Atn2(bStartY - cy, bStartX - cx))
         xRootMidArc = cx + rf * Cos(angRootMid)
         yRootMidArc = cy + rf * Sin(angRootMid)
         Set rootArc = swSketchManager.Create3PointArc(bStartX, bStartY, 0#, aStartX, aStartY, 0#, xRootMidArc, yRootMidArc, 0#)
@@ -168,7 +188,7 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
         bRootY = cy + rf * Sin(angB)
         swSketchManager.CreateLine aRootX, aRootY, 0#, aStartX, aStartY, 0#
         swSketchManager.CreateLine bStartX, bStartY, 0#, bRootX, bRootY, 0#
-        angRootMid = (Atn2(aRootY - cy, aRootX - cx) + Atn2(bRootY - cy, bRootX - cx)) * 0.5#
+        angRootMid = AverageAngleShortArc(Atn2(aRootY - cy, aRootX - cx), Atn2(bRootY - cy, bRootX - cx))
         xRootMidArc = cx + rf * Cos(angRootMid)
         yRootMidArc = cy + rf * Sin(angRootMid)
         Set rootArc = swSketchManager.Create3PointArc(bRootX, bRootY, 0#, aRootX, aRootY, 0#, xRootMidArc, yRootMidArc, 0#)
@@ -180,7 +200,9 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
     End If
 
     DrawInvoluteToothGapSketch = True
-    DebugPrint "DrawInvoluteToothGapSketch OK z=" & z & " rb=" & Format(rb * MM_PER_M, "0.###") & _
+    DebugPrint "DrawInvoluteToothGapSketch OK z=" & z & " gapAng=" & Format(rotB - rotA, "0.######") & _
+        " rad pitchAng=" & Format(toothAngle, "0.######") & " rotA(CCW)=" & Format(rotA, "0.######") & _
+        " rotB(CW)=" & Format(rotB, "0.######") & " rb=" & Format(rb * MM_PER_M, "0.###") & _
         " ra=" & Format(ra * MM_PER_M, "0.###") & " rf=" & Format(rf * MM_PER_M, "0.###") & " mm" & _
         IIf(needsRootConnector, " (root connectors)", "")
     On Error GoTo 0
