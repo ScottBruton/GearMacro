@@ -194,6 +194,7 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
         End If
         GearBuildStep "CalculateGearGeometry (driven/stacked)"
         CalculateGearGeometry
+        LogNewGearInputs "after CalculateGearGeometry (driven/stacked)"
         GearBuildStepOk
         GearBuildStep "FindOpenPartDocumentByTitle"
         Set swDoc = FindOpenPartDocumentByTitle(GearTrainDrivingPartTitle)
@@ -209,6 +210,7 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
     Else
         GearBuildStep "CalculateGearGeometry (driving)"
         CalculateGearGeometry
+        LogNewGearInputs "after CalculateGearGeometry (driving)"
         GearBuildStepOk
         GearBuildStep "NewPart"
         Set swDoc = swApp.NewPart
@@ -243,8 +245,11 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
     swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swInputDimValOnCreate, False
     GearBuildStepOk
 
-    DebugPrint "=== GenerateGear start z=" & GearGeom.NumTeeth & " m=" & GearGeom.ModuleMM & _
-        " role=" & GearTrainRole & " internal=" & GearGeom.IsInternal & " ==="
+    LogGearBuildBanner "GenerateGear START"
+    If GearTrainRole = GEAR_ROLE_DRIVEN Or GearTrainRole = GEAR_ROLE_STACKED Then
+        LogGearTrainDrivingSelection "GenerateGear start"
+    End If
+    LogNewGearInputs "GenerateGear start"
 
     GearBuildStep "SyncGearTrainLayoutCenterFromForm"
     SyncGearTrainLayoutCenterFromForm
@@ -260,6 +265,7 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
 
     GearBuildStep "SetGearTrainSketchOffsetFromLayout"
     SetGearTrainSketchOffsetFromLayout
+    LogGearLayoutState "after SetGearTrainSketchOffsetFromLayout"
     GearBuildStepOk FormatGearTrainOffsetSummary()
 
     GearBuildStep "CaptureSolidBodyCountBeforeGearBuild"
@@ -272,7 +278,12 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
 
     GearBuildStep "CreateGearGlobalVariableEquations"
     CreateGearGlobalVariableEquations
+    LogGearZStackChain "after CreateGearGlobalVariableEquations"
     GearBuildStepOk
+
+    GearBuildStep "SyncBossStartOffsetFromZEquations"
+    SyncBossStartOffsetFromZEquations
+    GearBuildStepOk FormatGearTrainOffsetSummary()
 
     GearBuildStep "CreateOrResetPart"
     If Not CreateOrResetPart() Then
@@ -293,6 +304,7 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
         GearBuildStepFail
         GoTo GenFail
     End If
+    LogGearBuildContext "after CreateGearRefAxisFromLayoutSketchPoint"
     GearBuildStepOk GetGearAxisName()
 
     GearBuildStep "CreateRevolveBlank"
@@ -300,6 +312,7 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
         GearBuildStepFail
         GoTo GenFail
     End If
+    LogGearBuildContext "after CreateRevolveBlank"
     GearBuildStepOk swRevolveFeat.Name
 
     GearBuildStep "CreateToothGapSketch"
@@ -314,6 +327,7 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
         GearBuildStepFail
         GoTo GenFail
     End If
+    LogGearBuildContext "after CutExtrudeToothGap"
     GearBuildStepOk swToothCutFeat.Name
 
     GearBuildStep "CircularPatternTooth"
@@ -353,6 +367,8 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
 
     swDoc.ViewZoomtofit2
     swDoc.ClearSelection2 True
+    LogGearBuildContext "GenerateGear SUCCESS"
+    LogAllRefAxesInPart
     DebugPrint "=== GenerateGear completed successfully ==="
     Exit Sub
 
@@ -361,6 +377,8 @@ GenFail:
     If gLastGearBuildError = "" And Err.Number <> 0 Then
         gLastGearBuildError = FormatVBError()
     End If
+    LogGearBuildContext "GenerateGear FAILED at " & gLastGearBuildStep
+    LogAllRefAxesInPart
     DebugPrint "=== GenerateGear FAILED at step: " & gLastGearBuildStep & " ==="
     If gLastGearBuildError <> "" Then
         DebugPrint "Error: " & gLastGearBuildError

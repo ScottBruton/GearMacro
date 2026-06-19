@@ -287,6 +287,7 @@ Private Function CreateRevolveProfileSketch(ByVal zBase As Double, ByVal hubW As
         swSketchManager.CreateLine zBase, axisY + odR, 0, zBase + rimW, axisY + odR, 0
         swSketchManager.CreateLine zBase + rimW, axisY + odR, 0, zBase + rimW, boreY, 0
         swSketchManager.CreateLine zBase + rimW, boreY, 0, zBase, boreY, 0
+        AddRevolveProfileZOffsetDimension zBase, axisY + odR * 0.35
     Else
         Set swLineHub = swSketchManager.CreateCenterLine(zBase - hubW, axisY, 0, zBase, axisY, 0)
         Set swLineRim = swSketchManager.CreateCenterLine(zBase, axisY, 0, zBase + rimW, axisY, 0)
@@ -306,6 +307,7 @@ Private Function CreateRevolveProfileSketch(ByVal zBase As Double, ByVal hubW As
         swSketchManager.CreateLine zBase, axisY + odR, 0, zBase + rimW, axisY + odR, 0
         swSketchManager.CreateLine zBase + rimW, axisY + odR, 0, zBase + rimW, boreY, 0
         swSketchManager.CreateLine zBase + rimW, boreY, 0, zBase - hubW, boreY, 0
+        AddRevolveProfileZOffsetDimension zBase, axisY + odR * 0.35
     End If
 
     swSketchManager.InsertSketch True
@@ -346,7 +348,10 @@ Public Function CreateRevolveBlank() As Boolean
     shaftR = GearGeom.ShaftRadiusM
     hubR = GearGeom.HubRadiusM
     odR = GearGeom.AddendumRadiusM
+    If GearTrainRole = GEAR_ROLE_STACKED Then SyncBossStartOffsetFromZEquations
     zBase = gBossStartOffsetZM
+    LogGearLayoutState "CreateRevolveBlank"
+    DebugPrint "CreateRevolveBlank: zBase (mm)=" & Format(zBase * MM_PER_M, "0.###") & " = gear" & GetCurrentGearIndex() & "_Zoffset"
 
     If gAxisName = "" And swGearAxisFeat Is Nothing Then
         NoteGearBuildError "CreateRevolveBlank: gear ref axis missing (create layout point axis first)"

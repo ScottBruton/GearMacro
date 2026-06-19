@@ -819,6 +819,8 @@ Private Sub cbGenerate_Click()
         Exit Sub
     End If
 
+    LogFormGenerateClick GearTrainRole, PressureAngle, Module, NumTeeth, Width, GearTrainMeshAngleDeg
+
     Me.Hide
     Call GenerateGear(PressureAngle, Module, NumTeeth, Width)
     ' Modeless: show form again after generate (do not Unload)

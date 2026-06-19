@@ -17,6 +17,7 @@ Public gLastGearBuildError As String
 Public gSketchOffsetXM As Double
 Public gSketchOffsetYM As Double
 Public gBossStartOffsetZM As Double
+Public gGapSketchOnOffsetPlane As Boolean
 Public gFrontPlaneName As String
 Public gAxisName As String
 Public gCurrentGearIndex As Long
@@ -54,6 +55,7 @@ Public Const GEAR_DIM_LAYOUT_SHAFT As String = "InvoluteGear_ShaftDia"
 Public Const GEAR_DIM_LAYOUT_CENTER_DIST As String = "InvoluteGear_LayoutCenterDist"
 Public Const GEAR_DIM_REVOLVE_RIM_WIDTH As String = "InvoluteGear_RimWidth"
 Public Const GEAR_DIM_REVOLVE_TOTAL_AXIAL As String = "InvoluteGear_TotalAxial"
+Public Const GEAR_DIM_REVOLVE_Z_OFFSET As String = "InvoluteGear_ZOffset"
 Public Const GEAR_DIM_GAP_ARC As String = "InvoluteGear_GapArc"
 Public Const GEAR_DIM_GAP_HALF_ARC As String = "InvoluteGear_GapHalfArc"
 Public Const GEAR_DIM_GAP_ROOT_FILLET As String = "InvoluteGear_GapRootFillet"
@@ -205,6 +207,7 @@ Public Sub ResetGearSketchOffset()
     gSketchOffsetXM = 0#
     gSketchOffsetYM = 0#
     gBossStartOffsetZM = 0#
+    gGapSketchOnOffsetPlane = False
     gUseSketchCenterlineAsAxis = False
     gPatternAxisLineId = ""
     gPatternAxisSketchName = ""
@@ -234,8 +237,254 @@ End Function
 
 Public Function FormatGearTrainOffsetSummary() As String
     FormatGearTrainOffsetSummary = "offset mm=(" & Format(gSketchOffsetXM * MM_PER_M, "0.###") & ", " & _
-        Format(gSketchOffsetYM * MM_PER_M, "0.###") & ") bossZ=" & Format(gBossStartOffsetZM * MM_PER_M, "0.###")
+        Format(gSketchOffsetYM * MM_PER_M, "0.###") & ") bossZ=" & Format(gBossStartOffsetZM * MM_PER_M, "0.###") & _
+        " gapOnOffsetPlane=" & CStr(gGapSketchOnOffsetPlane)
 End Function
+
+' =============================================================================
+' GEARLOG — structured debug output (Immediate Window Ctrl+G; also in DebugLog)
+' =============================================================================
+
+Public Function GearTrainRoleText() As String
+    Select Case GearTrainRole
+        Case GEAR_ROLE_DRIVING: GearTrainRoleText = "DRIVING"
+        Case GEAR_ROLE_DRIVEN: GearTrainRoleText = "DRIVEN"
+        Case GEAR_ROLE_STACKED: GearTrainRoleText = "STACKED"
+        Case Else: GearTrainRoleText = "role=" & CStr(GearTrainRole)
+    End Select
+End Function
+
+Public Sub LogGearBuildBanner(ByVal sectionTitle As String)
+    DebugPrint ""
+    DebugPrint "========== " & sectionTitle & " =========="
+End Sub
+
+Private Sub LogGearBodyBox(ByVal label As String, ByVal swBody As SldWorks.Body2)
+    Dim vBox As Variant
+    On Error Resume Next
+    If swBody Is Nothing Then
+        DebugPrint "  " & label & ": (body Nothing)"
+        Exit Sub
+    End If
+    vBox = swBody.GetBodyBox()
+    If IsArray(vBox) And UBound(vBox) >= 5 Then
+        DebugPrint "  " & label & ": name=""" & Trim$(swBody.name) & """ box mm X=[" & _
+            Format(vBox(0) * MM_PER_M, "0.###") & ".." & Format(vBox(3) * MM_PER_M, "0.###") & "] Y=[" & _
+            Format(vBox(1) * MM_PER_M, "0.###") & ".." & Format(vBox(4) * MM_PER_M, "0.###") & "] Z=[" & _
+            Format(vBox(2) * MM_PER_M, "0.###") & ".." & Format(vBox(5) * MM_PER_M, "0.###") & "]"
+    Else
+        DebugPrint "  " & label & ": name=""" & Trim$(swBody.name) & """ (no body box)"
+    End If
+    On Error GoTo 0
+End Sub
+
+Public Sub LogAllSolidBodiesInPart(Optional ByVal swPartDoc As SldWorks.ModelDoc2 = Nothing)
+    Dim vBodies As Variant
+    Dim swBody As SldWorks.Body2
+    Dim i As Long
+    Dim n As Long
+
+    If swPartDoc Is Nothing Then Set swPartDoc = swPart
+    If swPartDoc Is Nothing Then Set swPartDoc = swDoc
+    If swPartDoc Is Nothing Then
+        DebugPrint "  solid bodies: (no part doc)"
+        Exit Sub
+    End If
+    On Error Resume Next
+    vBodies = swPartDoc.GetBodies2(swSolidBody, False)
+    On Error GoTo 0
+    If Not IsArray(vBodies) Then
+        DebugPrint "  solid bodies: (none)"
+        Exit Sub
+    End If
+    n = UBound(vBodies) - LBound(vBodies) + 1
+    DebugPrint "  solid bodies in """ & swPartDoc.GetTitle & """: count=" & n
+    For i = LBound(vBodies) To UBound(vBodies)
+        Set swBody = vBodies(i)
+        LogGearBodyBox "  [" & CStr(i - LBound(vBodies) + 1) & "/" & CStr(n) & "]", swBody
+    Next i
+End Sub
+
+Public Sub LogAllRefAxesInPart(Optional ByVal swPartDoc As SldWorks.ModelDoc2 = Nothing)
+    Dim ft As SldWorks.Feature
+    Dim n As Long
+
+    If swPartDoc Is Nothing Then Set swPartDoc = swPart
+    If swPartDoc Is Nothing Then Set swPartDoc = swDoc
+    If swPartDoc Is Nothing Then Exit Sub
+    n = 0
+    Set ft = swPartDoc.FirstFeature
+    Do While Not ft Is Nothing
+        If FeatureIsRefAxis(ft) Then
+            n = n + 1
+            DebugPrint "  ref axis #" & n & ": """ & ft.name & """"
+        End If
+        Set ft = ft.GetNextFeature
+    Loop
+    If n = 0 Then DebugPrint "  ref axes: (none)"
+End Sub
+
+Public Sub LogGearZStackChain(Optional ByVal context As String = "")
+    Dim swPartDoc As SldWorks.ModelDoc2
+    Dim baseIdx As Long
+    Dim curIdx As Long
+    Dim i As Long
+    Dim wZ As Double
+
+    If context <> "" Then DebugPrint "LogGearZStackChain (" & context & "):"
+    Set swPartDoc = swPart
+    If swPartDoc Is Nothing Then Set swPartDoc = swDoc
+    baseIdx = ParseGearIndexFromBodyName(GearTrainDrivingBodyLabel)
+    curIdx = GetCurrentGearIndex()
+    DebugPrint "  base body=""" & GearTrainDrivingBodyLabel & """ parsedIndex=" & baseIdx & _
+        " currentBuildIndex=" & curIdx
+    If baseIdx > 0 Then
+        DebugPrint "  base gear" & baseIdx & " Zoffset mm=" & Format(ComputeGearZoffsetMM(swPartDoc, baseIdx), "0.###") & _
+            " ZstartingPoint mm=" & Format(ComputeGearZstartingPointMM(swPartDoc, baseIdx), "0.###") & _
+            " Width mm=" & Format(GetGearWidthMMForLog(swPartDoc, baseIdx), "0.###")
+    End If
+    If curIdx > 0 Then
+        DebugPrint "  new gear" & curIdx & " Zoffset mm=" & Format(ComputeGearZoffsetMM(swPartDoc, curIdx), "0.###") & _
+            " ZstartingPoint mm=" & Format(ComputeGearZstartingPointMM(swPartDoc, curIdx), "0.###") & _
+            " Width mm(form/geom)=" & Format(GearGeom.WidthMM, "0.###")
+    End If
+    For i = 1 To 6
+        If i = curIdx Or i = baseIdx Then GoTo NextZLog
+        wZ = 0#
+        If ReadGearGlobalWidthMM(swPartDoc, i, wZ) Or ComputeGearZoffsetMM(swPartDoc, i) > 0# Then
+            DebugPrint "  gear" & i & " Zoffset mm=" & Format(ComputeGearZoffsetMM(swPartDoc, i), "0.###") & _
+                " ZstartingPoint mm=" & Format(ComputeGearZstartingPointMM(swPartDoc, i), "0.###")
+        End If
+NextZLog:
+    Next i
+    DebugPrint "  gBossStartOffsetZM mm=" & Format(gBossStartOffsetZM * MM_PER_M, "0.###") & _
+        " bodyBoxTopFallback mm=" & Format(GetSelectedBaseGearBodyTopZM() * MM_PER_M, "0.###")
+End Sub
+
+Private Function GetGearWidthMMForLog(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal gearIndex As Long) As Double
+    Dim w As Double
+    If ReadGearGlobalWidthMM(swPartDoc, gearIndex, w) Then GetGearWidthMMForLog = w
+End Function
+
+Public Sub LogGearTrainDrivingSelection(Optional ByVal context As String = "")
+    Dim swPartDoc As SldWorks.ModelDoc2
+    Dim swBody As SldWorks.Body2
+    Dim xM As Double
+    Dim yM As Double
+    Dim baseIdx As Long
+    Dim ft As SldWorks.Feature
+    Dim axisName As String
+
+    LogGearBuildBanner IIf(context = "", "SELECTED BASE / DRIVING GEAR", "SELECTED BASE / DRIVING GEAR — " & context)
+    DebugPrint "  role=" & GearTrainRoleText()
+    DebugPrint "  part=""" & GearTrainDrivingPartTitle & """"
+    DebugPrint "  body=""" & GearTrainDrivingBodyLabel & """"
+    baseIdx = ParseGearIndexFromBodyName(GearTrainDrivingBodyLabel)
+    DebugPrint "  parsedGearIndex=" & baseIdx
+    DebugPrint "  metadata: z=" & GearTrainDrivingTeeth & " m=" & Format(GearTrainDrivingModuleMM, "0.####") & _
+        " pa=" & Format(GearTrainDrivingPressureDeg, "0.####") & " width=" & Format(GearTrainDrivingWidthMM, "0.####") & " mm" & _
+        IIf(GearTrainDrivingIsInternal, " INTERNAL", " EXTERNAL")
+    axisName = BuildGearAxisFeatureNameFromBodyLabel(GearTrainDrivingBodyLabel)
+    DebugPrint "  expectedAxisName=""" & axisName & """ GearTrainDrivingAxisName=""" & GearTrainDrivingAxisName & """"
+    Set swPartDoc = FindOpenPartDocumentByTitle(GearTrainDrivingPartTitle)
+    If swPartDoc Is Nothing Then Set swPartDoc = swDoc
+    If Not swPartDoc Is Nothing Then
+        Set swBody = FindSolidBodyByName(swPartDoc, GearTrainDrivingBodyLabel)
+        LogGearBodyBox "baseBody", swBody
+        If GetGearBodyCenterOnFrontPlaneM(swPartDoc, GearTrainDrivingBodyLabel, xM, yM) Then
+            DebugPrint "  centreOnFrontPlane mm=(" & Format(xM * MM_PER_M, "0.###") & ", " & Format(yM * MM_PER_M, "0.###") & ")"
+        Else
+            DebugPrint "  centreOnFrontPlane: (could not resolve)"
+        End If
+        Set ft = FindRefAxisFeatureByName(axisName, swPartDoc)
+        If ft Is Nothing And GearTrainDrivingAxisName <> "" Then
+            Set ft = FindRefAxisFeatureByName(GearTrainDrivingAxisName, swPartDoc)
+        End If
+        If Not ft Is Nothing Then
+            DebugPrint "  axisFeatureFound: """ & ft.name & """"
+        Else
+            DebugPrint "  axisFeatureFound: NO — listing all ref axes in part:"
+            LogAllRefAxesInPart swPartDoc
+        End If
+        If GearTrainRole = GEAR_ROLE_STACKED Then
+            LogGearZStackChain "from base selection"
+        End If
+    Else
+        DebugPrint "  part doc not open"
+    End If
+End Sub
+
+Public Sub LogNewGearInputs(Optional ByVal context As String = "")
+    LogGearBuildBanner IIf(context = "", "NEW GEAR INPUTS", "NEW GEAR INPUTS — " & context)
+    DebugPrint "  role=" & GearTrainRoleText() & " buildIndex=" & GetCurrentGearIndex()
+    DebugPrint "  form/API: z=" & GearGeom.NumTeeth & " m=" & Format(GearGeom.ModuleMM, "0.####") & _
+        " pa=" & Format(GearGeom.PressureAngleDeg, "0.####") & " width=" & Format(GearGeom.WidthMM, "0.####") & " mm" & _
+        IIf(GearGeom.IsInternal, " INTERNAL", " EXTERNAL")
+    DebugPrint "  calculated: Dp=" & Format(GearGeom.PitchDiameterMM, "0.###") & " Da=" & Format(GearGeom.AddendumDiameterMM, "0.###") & _
+        " Dd=" & Format(GearGeom.DedendumDiameterMM, "0.###") & " mm"
+    DebugPrint "  hub: useHub=" & GearGeom.UseHub & " hubDia=" & Format(GearGeom.HubDiameterMM, "0.###") & _
+        " shaftDia=" & Format(GearGeom.ShaftDiameterMM, "0.###") & " rimW=" & Format(GearGeom.RimWidthMM, "0.###") & _
+        " hubW=" & Format(GearGeom.HubWidthMM, "0.###") & " mm"
+    If GearTrainRole = GEAR_ROLE_DRIVEN Then
+        DebugPrint "  driven layout: C=" & Format(GearTrainCenterDistanceMM, "0.###") & _
+            " layoutC=" & Format(GearTrainLayoutCenterDistanceMM, "0.###") & _
+            " meshAngle=" & Format(GearTrainMeshAngleDeg, "0.###") & " deg"
+    End If
+End Sub
+
+Public Sub LogGearLayoutState(Optional ByVal context As String = "")
+    If context <> "" Then DebugPrint "LogGearLayoutState (" & context & "):"
+    DebugPrint "  XY offset mm=(" & Format(gSketchOffsetXM * MM_PER_M, "0.###") & ", " & _
+        Format(gSketchOffsetYM * MM_PER_M, "0.###") & ")"
+    DebugPrint "  bossZ mm=" & Format(gBossStartOffsetZM * MM_PER_M, "0.###") & _
+        " gapSketchOnOffsetPlane=" & CStr(gGapSketchOnOffsetPlane) & _
+        " needsGapPlane=" & CStr(GearNeedsGapOffsetPlane())
+    DebugPrint "  axis gAxisName=""" & gAxisName & """ layoutSk=""" & gLayoutSketchFeatName & """"
+End Sub
+
+Public Sub LogGearBuildContext(Optional ByVal context As String = "")
+    Dim swBody As SldWorks.Body2
+
+    LogGearBuildBanner IIf(context = "", "BUILD CONTEXT", "BUILD CONTEXT — " & context)
+    DebugPrint "  gearIndex=" & GetCurrentGearIndex() & " prefix=""" & BuildGearPrefixName() & """"
+    DebugPrint "  bodiesBeforeBuild=" & gGearSolidBodyCountBefore & " partNeedsCutScope=" & PartNeedsCutFeatureScope()
+    DebugPrint "  revolveFeat=""" & FeatureNameOrEmpty(swRevolveFeat) & """ cutFeat=""" & FeatureNameOrEmpty(swToothCutFeat) & """"
+    DebugPrint "  patternFeat=""" & FeatureNameOrEmpty(swPatternFeat) & """"
+    Set swBody = GetCurrentGearSolidBody()
+    If swBody Is Nothing Then
+        DebugPrint "  currentGearSolidBody: (Nothing)"
+    Else
+        LogGearBodyBox "currentGearSolidBody", swBody
+    End If
+    LogGearLayoutState context
+    LogAllSolidBodiesInPart
+End Sub
+
+Private Function FeatureNameOrEmpty(ByVal swFeat As SldWorks.Feature) As String
+    On Error Resume Next
+    FeatureNameOrEmpty = ""
+    If Not swFeat Is Nothing Then FeatureNameOrEmpty = swFeat.name
+    On Error GoTo 0
+End Function
+
+Public Sub LogFormGenerateClick(ByVal role As Long, ByVal pressureAngle As Double, ByVal moduleMM As Double, _
+    ByVal numTeeth As Long, ByVal widthMM As Double, ByVal meshAngleDeg As Double)
+    LogGearBuildBanner "FORM GENERATE CLICK"
+    DebugPrint "  role=" & GearTrainRoleText() & " (GearTrainRole=" & role & ")"
+    DebugPrint "  new gear form values: z=" & numTeeth & " m=" & Format(moduleMM, "0.####") & _
+        " pa=" & Format(pressureAngle, "0.####") & " width=" & Format(widthMM, "0.####") & " mm"
+    DebugPrint "  meshAngle=" & Format(meshAngleDeg, "0.####") & " deg internal=" & GearGeom.IsInternal
+    If role = GEAR_ROLE_DRIVEN Or role = GEAR_ROLE_STACKED Then
+        LogGearTrainDrivingSelection "at form Generate click"
+    End If
+End Sub
+
+Public Sub LogCutExtrudeParams(ByVal startCond As Long, ByVal startOffM As Double, ByVal useFeatScope As Boolean, _
+    ByVal selCount As Long, ByVal depthMM As Double)
+    DebugPrint "LogCutExtrudeParams: selCount=" & selCount & " depth=" & Format(depthMM, "0.###") & " mm" & _
+        " startCond=" & startCond & " startOff mm=" & Format(startOffM * MM_PER_M, "0.###") & _
+        " featureScope=" & CStr(useFeatScope) & " gapOnOffsetPlane=" & CStr(gGapSketchOnOffsetPlane)
+End Sub
 
 ' Clear feature refs from a prior GenerateGear run (avoid reusing last driven gear axis/cut)
 Public Sub ResetGearBuildFeatureRefs()
@@ -266,6 +515,8 @@ End Sub
 Public Sub GetGearExtrudeStartParams(ByRef startCond As Long, ByRef startOff As Double)
     startCond = SW_START_SKETCH_PLANE
     startOff = 0#
+    ' Gap sketch on GearN_GapPlane (at Zoffset) — cut from plane, no start offset.
+    If gGapSketchOnOffsetPlane Then Exit Sub
     If gBossStartOffsetZM > 0.0000000001 Then
         startCond = SW_START_OFFSET
         startOff = gBossStartOffsetZM
@@ -435,6 +686,98 @@ End Sub
 
 Public Function GearNeedsLocalRevolvePlane() As Boolean
     GearNeedsLocalRevolvePlane = (Abs(gSketchOffsetXM) > 0.00001 Or Abs(gSketchOffsetYM) > 0.00001)
+End Function
+
+Public Function GearNeedsGapOffsetPlane() As Boolean
+    GearNeedsGapOffsetPlane = (gBossStartOffsetZM > 0.0000000001)
+End Function
+
+' Plane parallel to Front Plane at gearN_Zoffset (stacked gear tooth-gap sketch plane).
+Private Function InsertGapPlaneOffsetFromFront(ByVal offsetM As Double) As SldWorks.Feature
+    On Error Resume Next
+    Set InsertGapPlaneOffsetFromFront = Nothing
+    If offsetM <= 0.0000000001 Then Exit Function
+    If swFrontPlaneFeat Is Nothing Then
+        If Not ResolveAndStoreFrontPlane() Then Exit Function
+    End If
+
+    ExitActiveSketchIfAny
+    ClearSWSelection
+    RebuildSWPart
+    swFrontPlaneFeat.Select False
+    If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then
+        swModelDocExt.SelectByID2 gFrontPlaneName, "PLANE", 0, 0, 0, False, 0, Nothing, 0
+    End If
+    If swSelMgr.GetSelectedObjectCount2(-1) < 1 Then Exit Function
+
+    Err.Clear
+    ' swRefPlaneReferenceConstraint_Offset = 8 — offset from selected plane (metres).
+    Set InsertGapPlaneOffsetFromFront = swFeatMgr.InsertRefPlane(8, offsetM, 0, 0, 0, 0)
+    If InsertGapPlaneOffsetFromFront Is Nothing Then
+        Set InsertGapPlaneOffsetFromFront = swFeatMgr.InsertRefPlane(1, 0, 8, offsetM, 0, 0)
+    End If
+    If InsertGapPlaneOffsetFromFront Is Nothing And Err.Number <> 0 Then
+        DebugPrint "InsertGapPlaneOffsetFromFront err: " & Err.Number & " " & Err.Description
+        Err.Clear
+    End If
+    ClearSWSelection
+    On Error GoTo 0
+End Function
+
+Public Function GetOrCreateGearGapPlaneFeat() As SldWorks.Feature
+    Dim planeName As String
+    Dim swPlane As SldWorks.Feature
+
+    Set GetOrCreateGearGapPlaneFeat = Nothing
+    If Not GearNeedsGapOffsetPlane() Then Exit Function
+
+    If swFrontPlaneFeat Is Nothing Then
+        If Not ResolveAndStoreFrontPlane() Then Exit Function
+    End If
+
+    planeName = BuildGearPrefixName() & "_GapPlane"
+    Set swPlane = swPart.FeatureByName(planeName)
+    If Not swPlane Is Nothing Then
+        Set GetOrCreateGearGapPlaneFeat = swPlane
+        DebugPrint "GetOrCreateGearGapPlaneFeat: reuse " & planeName
+        Exit Function
+    End If
+
+    Set swPlane = InsertGapPlaneOffsetFromFront(gBossStartOffsetZM)
+    If swPlane Is Nothing Then
+        DebugPrint "GetOrCreateGearGapPlaneFeat: InsertGapPlaneOffsetFromFront failed offset mm=" & _
+            Format(gBossStartOffsetZM * MM_PER_M, "0.###")
+        Exit Function
+    End If
+
+    RenameSketchFeatureSafe swPlane, planeName
+    RebuildSWPart
+    Set GetOrCreateGearGapPlaneFeat = swPlane
+    DebugPrint "GetOrCreateGearGapPlaneFeat: created " & planeName & " at Zoffset mm=" & _
+        Format(gBossStartOffsetZM * MM_PER_M, "0.###")
+End Function
+
+' Front Plane for driving / first gear; offset GapPlane for stacked gears at gearN_Zoffset.
+Public Function BeginSketchOnGapPlane() As Boolean
+    Dim swPlane As SldWorks.Feature
+
+    gGapSketchOnOffsetPlane = False
+    If GearNeedsGapOffsetPlane() Then
+        Set swPlane = GetOrCreateGearGapPlaneFeat()
+        If swPlane Is Nothing Then
+            DebugPrint "BeginSketchOnGapPlane: GapPlane failed — falling back to Front Plane"
+            BeginSketchOnGapPlane = BeginSketchOnFrontPlane()
+            Exit Function
+        End If
+        BeginSketchOnGapPlane = BeginSketchOnPlaneFeat(swPlane)
+        If BeginSketchOnGapPlane Then
+            gGapSketchOnOffsetPlane = True
+            DebugPrint "BeginSketchOnGapPlane: on " & swPlane.name & " (Zoffset mm=" & _
+                Format(gBossStartOffsetZM * MM_PER_M, "0.###") & ")"
+        End If
+    Else
+        BeginSketchOnGapPlane = BeginSketchOnFrontPlane()
+    End If
 End Function
 
 ' Plane parallel to Right Plane through GearN_Axis (Right Plane + ref axis selected).
@@ -1779,11 +2122,16 @@ Public Function CreateGearRefAxisFromLayoutSketchPoint() As Boolean
     If GearTrainRole = GEAR_ROLE_STACKED Then
         If TryReuseStackedBaseGearAxis() Then
             CreateGearRefAxisFromLayoutSketchPoint = True
-            DebugPrint "CreateGearRefAxisFromLayoutSketchPoint OK (stacked reuses selected axis): " & gAxisName
+            DebugPrint "CreateGearRefAxisFromLayoutSketchPoint OK (stacked reuses ref axis): " & gAxisName
             Exit Function
         End If
-        DebugPrint "CreateGearRefAxisFromLayoutSketchPoint FAIL: stacked gear needs base axis """ & _
-            BuildGearAxisFeatureNameFromBodyLabel(GearTrainDrivingBodyLabel) & """"
+        If CreateGearRefAxisFromLayoutCenter() Then
+            CreateGearRefAxisFromLayoutSketchPoint = True
+            DebugPrint "CreateGearRefAxisFromLayoutSketchPoint OK (stacked created layout axis): " & gAxisName
+            Exit Function
+        End If
+        DebugPrint "CreateGearRefAxisFromLayoutSketchPoint FAIL: stacked gear could not resolve ref axis for """ & _
+            GearTrainDrivingBodyLabel & """"
         Exit Function
     End If
 
@@ -1942,6 +2290,7 @@ End Sub
 Public Function TryReuseStackedBaseGearAxis() As Boolean
     Dim ft As SldWorks.Feature
     Dim axisName As String
+    Dim baseIdx As Long
 
     TryReuseStackedBaseGearAxis = False
     If GearTrainRole <> GEAR_ROLE_STACKED Then Exit Function
@@ -1951,18 +2300,109 @@ Public Function TryReuseStackedBaseGearAxis() As Boolean
         axisName = BuildGearAxisFeatureNameFromBodyLabel(GearTrainDrivingBodyLabel)
         GearTrainDrivingAxisName = axisName
     End If
-    If axisName = "" Then Exit Function
 
-    Set ft = FindRefAxisFeatureByName(axisName)
-    If ft Is Nothing Then
+    If axisName <> "" Then
+        Set ft = FindRefAxisFeatureByName(axisName)
+        If Not ft Is Nothing Then GoTo AxisFound
         DebugPrint "TryReuseStackedBaseGearAxis: axis not found: " & axisName
-        Exit Function
     End If
 
+    baseIdx = ParseGearIndexFromBodyName(GearTrainDrivingBodyLabel)
+    If baseIdx > 0 Then
+        Set ft = FindRefAxisFeatureByName("Gear" & baseIdx & "_Axis")
+        If Not ft Is Nothing Then GoTo AxisFound
+    End If
+
+    Set ft = FindCoaxialStackPrimaryRefAxis()
+    If Not ft Is Nothing Then
+        DebugPrint "TryReuseStackedBaseGearAxis: coaxial stack fallback -> " & ft.name
+        GoTo AxisFound
+    End If
+
+    Exit Function
+
+AxisFound:
     Set swGearAxisFeat = ft
     gAxisName = ft.name
     TryReuseStackedBaseGearAxis = True
-    DebugPrint "Stacked gear reuses selected base ref axis: " & gAxisName
+    DebugPrint "Stacked gear reuses ref axis: " & gAxisName
+    LogGearLayoutState "TryReuseStackedBaseGearAxis"
+End Function
+
+' Lowest-index macro gear body axis in the part (Gear1 axis when gear2 has no named axis yet).
+Private Function FindCoaxialStackPrimaryRefAxis() As SldWorks.Feature
+    Dim vBodies As Variant
+    Dim swBody As SldWorks.Body2
+    Dim i As Long
+    Dim gearIdx As Long
+    Dim bestIdx As Long
+    Dim bodyName As String
+    Dim axisName As String
+    Dim ft As SldWorks.Feature
+
+    Set FindCoaxialStackPrimaryRefAxis = Nothing
+    If swPart Is Nothing Then Exit Function
+
+    On Error Resume Next
+    vBodies = swPart.GetBodies2(swSolidBody, False)
+    On Error GoTo 0
+    If Not IsArray(vBodies) Then Exit Function
+
+    bestIdx = 0
+    For i = LBound(vBodies) To UBound(vBodies)
+        Set swBody = vBodies(i)
+        If swBody Is Nothing Then GoTo NextBodyAxis
+        bodyName = Trim$(swBody.name)
+        gearIdx = ParseGearIndexFromBodyName(bodyName)
+        If gearIdx < 1 Then GoTo NextBodyAxis
+
+        Set ft = Nothing
+        axisName = BuildGearAxisFeatureNameFromBodyLabel(bodyName)
+        If axisName <> "" Then Set ft = FindRefAxisFeatureByName(axisName)
+        If ft Is Nothing Then Set ft = FindRefAxisFeatureByName("Gear" & gearIdx & "_Axis")
+        If Not ft Is Nothing Then
+            If bestIdx = 0 Or gearIdx < bestIdx Then
+                bestIdx = gearIdx
+                Set FindCoaxialStackPrimaryRefAxis = ft
+            End If
+        End If
+NextBodyAxis:
+    Next i
+End Function
+
+' Insert a ref axis at the stacked gear centre and name it (coaxial with prior stack gears).
+Private Function CreateNamedCoaxialRefAxis(ByVal axisName As String) As Boolean
+    Dim axisCountBefore As Long
+    Dim swPt As SldWorks.SketchPoint
+
+    CreateNamedCoaxialRefAxis = False
+    If axisName = "" Then Exit Function
+    If Not FindRefAxisFeatureByName(axisName) Is Nothing Then
+        ApplyGearAxisFeatureName FindRefAxisFeatureByName(axisName), axisName
+        CreateNamedCoaxialRefAxis = True
+        Exit Function
+    End If
+
+    If swFrontPlaneFeat Is Nothing Then
+        If Not ResolveAndStoreFrontPlane() Then Exit Function
+    End If
+
+    axisCountBefore = CountRefAxisFeatures()
+    If Abs(gSketchOffsetXM) < 0.00001 And Abs(gSketchOffsetYM) < 0.00001 Then
+        If Not InsertSingleRefAxisFrontPlaneAndOrigin() Then Exit Function
+    Else
+        Set swPt = GetLayoutCenterSketchPoint()
+        If swPt Is Nothing Then
+            If Not InsertSingleRefAxisFrontPlaneAndOrigin() Then Exit Function
+        Else
+            If Not InsertSingleRefAxisFrontPlaneAndSketchPoint(swPt) Then Exit Function
+        End If
+    End If
+
+    CreateNamedCoaxialRefAxis = CommitRefAxisAfterInsert(axisCountBefore, axisName)
+    If CreateNamedCoaxialRefAxis Then
+        DebugPrint "CreateNamedCoaxialRefAxis OK: " & axisName
+    End If
 End Function
 
 Private Function CreateGearAxis() As Boolean
@@ -2537,13 +2977,33 @@ End Sub
 
 Public Sub NameGearAxisForCurrentBuild()
     Dim axisName As String
+    Dim ft As SldWorks.Feature
     DebugPrint "NameGearAxisForCurrentBuild: begin"
 
     If GearTrainRole = GEAR_ROLE_STACKED Then
-        If TryReuseStackedBaseGearAxis() Then
-            DebugPrint "NameGearAxisForCurrentBuild: stacked keeps selected axis " & gAxisName
+        axisName = BuildGearAxisFeatureName()
+        If axisName = "" Then
+            DebugPrint "NameGearAxisForCurrentBuild: stacked — empty axis name"
+            Exit Sub
+        End If
+        Set ft = FindRefAxisFeatureByName(axisName)
+        If Not ft Is Nothing Then
+            ApplyGearAxisFeatureName ft, axisName
+            DebugPrint "NameGearAxisForCurrentBuild: stacked already has " & axisName
+            Exit Sub
+        End If
+        Set ft = FindRefAxisFeatureByName(BuildGearRefAxisName())
+        If Not ft Is Nothing Then
+            ApplyGearAxisFeatureName ft, axisName
+            DebugPrint "NameGearAxisForCurrentBuild: stacked renamed " & BuildGearRefAxisName() & " -> " & axisName
+            Exit Sub
+        End If
+        If CreateNamedCoaxialRefAxis(axisName) Then
+            DebugPrint "NameGearAxisForCurrentBuild: stacked created " & axisName
+        ElseIf TryReuseStackedBaseGearAxis() Then
+            DebugPrint "NameGearAxisForCurrentBuild: stacked build axis reuse only " & gAxisName & " (named axis pending)"
         Else
-            DebugPrint "NameGearAxisForCurrentBuild: stacked — selected base axis not found"
+            DebugPrint "NameGearAxisForCurrentBuild: stacked — could not create " & axisName
         End If
         Exit Sub
     End If
@@ -2573,9 +3033,9 @@ Public Sub SyncDrivingGearAxisReference(ByVal swPartDoc As SldWorks.ModelDoc2)
     If GearTrainDrivingAxisName = "" Then Exit Sub
     Set ft = FindRefAxisFeatureByName(GearTrainDrivingAxisName, swPartDoc)
     If ft Is Nothing Then
-        DebugPrint "Driving gear axis not found (generate/rename driving gear first): " & GearTrainDrivingAxisName
+        DebugPrint "SyncDrivingGearAxisReference: axis NOT found """ & GearTrainDrivingAxisName & """ in """ & swPartDoc.GetTitle & """"
     Else
-        DebugPrint "Driving gear axis reference: " & GearTrainDrivingAxisName
+        DebugPrint "SyncDrivingGearAxisReference: axis found """ & GearTrainDrivingAxisName & """"
         If GearTrainRole = GEAR_ROLE_STACKED Then
             Set swGearAxisFeat = ft
             gAxisName = ft.name
@@ -2908,6 +3368,262 @@ Private Function GearGlobalVarName(ByVal suffix As String) As String
     GearGlobalVarName = "gear" & GetCurrentGearIndex() & "_" & suffix
 End Function
 
+Private Function GearGlobalVarNameForIndex(ByVal gearIndex As Long, ByVal suffix As String) As String
+    GearGlobalVarNameForIndex = "gear" & gearIndex & "_" & suffix
+End Function
+
+Private Function BuildGearZstartingPointEquationRhs(ByVal gearIndex As Long) As String
+    BuildGearZstartingPointEquationRhs = EqQuotedName(GearGlobalVarNameForIndex(gearIndex, "Zoffset")) & " + " & _
+        EqQuotedName(GearGlobalVarNameForIndex(gearIndex, "Width"))
+End Function
+
+' Evaluated global variable value in metres (for sketch / API coords).
+Private Function ParseQuotedGlobalVarNameFromRhs(ByVal rhs As String) As String
+    rhs = Trim$(rhs)
+    ParseQuotedGlobalVarNameFromRhs = ""
+    If Len(rhs) < 3 Then Exit Function
+    If Left$(rhs, 1) <> Chr(34) Then Exit Function
+    ParseQuotedGlobalVarNameFromRhs = Split(Mid$(rhs, 2), Chr(34))(0)
+End Function
+
+Private Function ParseGearIndexFromGlobalVarName(ByVal varName As String) As Long
+    Dim i As Long
+    Dim digits As String
+    Dim ch As String
+
+    ParseGearIndexFromGlobalVarName = 0
+    varName = Trim$(varName)
+    If LCase$(Left$(varName, 4)) <> "gear" Then Exit Function
+    i = 5
+    Do While i <= Len(varName)
+        ch = Mid$(varName, i, 1)
+        If ch >= "0" And ch <= "9" Then
+            digits = digits & ch
+            i = i + 1
+        Else
+            Exit Do
+        End If
+    Loop
+    If digits <> "" Then ParseGearIndexFromGlobalVarName = CLng(digits)
+End Function
+
+Private Function ReadGearGlobalWidthMM(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal gearIndex As Long, ByRef widthMM As Double) As Boolean
+    Dim swEqnMgr As SldWorks.EquationMgr
+
+    ReadGearGlobalWidthMM = False
+    widthMM = 0#
+    If swPartDoc Is Nothing Or gearIndex < 1 Then Exit Function
+    Set swEqnMgr = swPartDoc.GetEquationMgr
+    If swEqnMgr Is Nothing Then Exit Function
+    If ReadEquationGlobalDouble(swEqnMgr, GearGlobalVarNameForIndex(gearIndex, "Width"), widthMM) Then
+        ReadGearGlobalWidthMM = True
+        Exit Function
+    End If
+    ReadGearGlobalWidthMM = ReadEquationGlobalDouble(swEqnMgr, GearGlobalVarNameForIndex(gearIndex, "RimWidth"), widthMM)
+End Function
+
+Private Function ResolveGlobalVarReferenceToMM(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal refVarName As String) As Double
+    Dim gearIdx As Long
+
+    ResolveGlobalVarReferenceToMM = 0#
+    refVarName = Trim$(refVarName)
+    If refVarName = "" Then Exit Function
+    gearIdx = ParseGearIndexFromGlobalVarName(refVarName)
+    If gearIdx < 1 Then Exit Function
+
+    If InStr(1, refVarName, "_ZstartingPoint", vbTextCompare) > 0 Then
+        ResolveGlobalVarReferenceToMM = ComputeGearZstartingPointMM(swPartDoc, gearIdx)
+    ElseIf InStr(1, refVarName, "_Zoffset", vbTextCompare) > 0 Then
+        ResolveGlobalVarReferenceToMM = ComputeGearZoffsetMM(swPartDoc, gearIdx)
+    End If
+End Function
+
+' gearN_Zoffset in mm (equation chain — globals stored/displayed in mm like Width).
+Private Function ComputeGearZoffsetMM(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal gearIndex As Long) As Double
+    Dim swEqnMgr As SldWorks.EquationMgr
+    Dim idx As Long
+    Dim eqLine As String
+    Dim rhs As String
+    Dim refName As String
+
+    ComputeGearZoffsetMM = 0#
+    If swPartDoc Is Nothing Or gearIndex < 1 Then Exit Function
+    Set swEqnMgr = swPartDoc.GetEquationMgr
+    If swEqnMgr Is Nothing Then Exit Function
+
+    idx = FindEquationIndexByVarName(swEqnMgr, GearGlobalVarNameForIndex(gearIndex, "Zoffset"))
+    If idx < 0 Then
+        If gearIndex = 1 Then
+            ComputeGearZoffsetMM = 0#
+        Else
+            ComputeGearZoffsetMM = ComputeGearZstartingPointMM(swPartDoc, gearIndex - 1)
+        End If
+        Exit Function
+    End If
+
+    eqLine = swEqnMgr.Equation(idx)
+    rhs = Trim$(Split(eqLine, "=")(1))
+    If rhs = "0" Or rhs = "0." Then Exit Function
+
+    refName = ParseQuotedGlobalVarNameFromRhs(rhs)
+    If refName <> "" Then
+        ComputeGearZoffsetMM = ResolveGlobalVarReferenceToMM(swPartDoc, refName)
+        Exit Function
+    End If
+
+    On Error Resume Next
+    ComputeGearZoffsetMM = CDbl(rhs)
+    On Error GoTo 0
+End Function
+
+' gearN_ZstartingPoint = gearN_Zoffset + gearN_Width (mm).
+Private Function ComputeGearZstartingPointMM(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal gearIndex As Long) As Double
+    Dim widthMM As Double
+
+    ComputeGearZstartingPointMM = ComputeGearZoffsetMM(swPartDoc, gearIndex)
+    If ReadGearGlobalWidthMM(swPartDoc, gearIndex, widthMM) Then
+        ComputeGearZstartingPointMM = ComputeGearZstartingPointMM + widthMM
+    End If
+End Function
+
+Private Function GlobalVarValueMMToM(ByVal valueMM As Double) As Double
+    GlobalVarValueMMToM = valueMM / MM_PER_M
+End Function
+
+Private Function GetGlobalVariableEvaluatedM(ByVal swPartDoc As SldWorks.ModelDoc2, ByVal varName As String) As Double
+    Dim gearIdx As Long
+
+    GetGlobalVariableEvaluatedM = 0#
+    If swPartDoc Is Nothing Or varName = "" Then Exit Function
+
+    gearIdx = ParseGearIndexFromGlobalVarName(varName)
+    If gearIdx > 0 Then
+        If InStr(1, varName, "_ZstartingPoint", vbTextCompare) > 0 Then
+            GetGlobalVariableEvaluatedM = GlobalVarValueMMToM(ComputeGearZstartingPointMM(swPartDoc, gearIdx))
+            Exit Function
+        ElseIf InStr(1, varName, "_Zoffset", vbTextCompare) > 0 Then
+            GetGlobalVariableEvaluatedM = GlobalVarValueMMToM(ComputeGearZoffsetMM(swPartDoc, gearIdx))
+            Exit Function
+        End If
+    End If
+End Function
+
+' Ensure gearN_Zoffset / gearN_ZstartingPoint exist (retrofit legacy parts before stacking).
+Private Sub EnsureGearZStackEquationsForIndex(ByVal gearIndex As Long)
+    Dim swEqnMgr As SldWorks.EquationMgr
+    Dim zoffName As String
+    Dim zstartName As String
+    Dim zoffRhs As String
+
+    If swPart Is Nothing Or gearIndex < 1 Then Exit Sub
+    Set swEqnMgr = swPart.GetEquationMgr
+    If swEqnMgr Is Nothing Then Exit Sub
+
+    zoffName = GearGlobalVarNameForIndex(gearIndex, "Zoffset")
+    If FindEquationIndexByVarName(swEqnMgr, zoffName) >= 0 Then Exit Sub
+
+    If gearIndex = 1 Then
+        zoffRhs = "0"
+    Else
+        EnsureGearZStackEquationsForIndex gearIndex - 1
+        zoffRhs = EqQuotedName(GearGlobalVarNameForIndex(gearIndex - 1, "ZstartingPoint"))
+    End If
+
+    AddOrUpdateGlobalEquation zoffName, zoffRhs
+    zstartName = GearGlobalVarNameForIndex(gearIndex, "ZstartingPoint")
+    AddOrUpdateGlobalEquation zstartName, BuildGearZstartingPointEquationRhs(gearIndex)
+    DebugPrint "EnsureGearZStackEquationsForIndex: added " & zoffName & ", " & zstartName
+End Sub
+
+Private Sub AddGearZStackEquationsForCurrentBuild()
+    Dim baseIdx As Long
+    Dim qWidth As String
+    Dim zoffRhs As String
+
+    qWidth = EqQuotedName(GearGlobalVarName("Width"))
+
+    If GearTrainRole = GEAR_ROLE_STACKED Then
+        baseIdx = ParseGearIndexFromBodyName(GearTrainDrivingBodyLabel)
+        If baseIdx > 0 Then
+            EnsureGearZStackEquationsForIndex baseIdx
+            zoffRhs = EqQuotedName(GearGlobalVarNameForIndex(baseIdx, "ZstartingPoint"))
+        Else
+            zoffRhs = Format(GetSelectedBaseGearBodyTopZM() * MM_PER_M, "0.####")
+        End If
+        AddOrUpdateGlobalEquation GearGlobalVarName("Zoffset"), zoffRhs
+    Else
+        AddOrUpdateGlobalEquation GearGlobalVarName("Zoffset"), "0"
+    End If
+
+    AddOrUpdateGlobalEquation GearGlobalVarName("ZstartingPoint"), _
+        EqQuotedName(GearGlobalVarName("Zoffset")) & " + " & qWidth
+    DebugPrint "AddGearZStackEquations: gear" & GetCurrentGearIndex() & " Zoffset=" & zoffRhs & _
+        " ZstartingPoint=" & EqQuotedName(GearGlobalVarName("Zoffset")) & " + " & qWidth
+End Sub
+
+' Stacked boss start = this gear's Zoffset (mm globals -> API metres). Same as base gear ZstartingPoint.
+Public Function GetStackedBossStartOffsetM() As Double
+    Dim swPartDoc As SldWorks.ModelDoc2
+    Dim baseIdx As Long
+    Dim zOffMM As Double
+    Dim zStartMM As Double
+
+    GetStackedBossStartOffsetM = 0#
+    Set swPartDoc = swPart
+    If swPartDoc Is Nothing Then Set swPartDoc = swDoc
+    If swPartDoc Is Nothing Then Exit Function
+
+    baseIdx = ParseGearIndexFromBodyName(GearTrainDrivingBodyLabel)
+    If baseIdx > 0 Then EnsureGearZStackEquationsForIndex baseIdx
+
+    If GetCurrentGearIndex() > 0 Then
+        zOffMM = ComputeGearZoffsetMM(swPartDoc, GetCurrentGearIndex())
+    End If
+    If zOffMM <= 0# And baseIdx > 0 Then
+        zStartMM = ComputeGearZstartingPointMM(swPartDoc, baseIdx)
+        zOffMM = zStartMM
+    End If
+    If zOffMM > 0.0000000001 Then
+        GetStackedBossStartOffsetM = GlobalVarValueMMToM(zOffMM)
+        Exit Function
+    End If
+
+    GetStackedBossStartOffsetM = GetSelectedBaseGearBodyTopZM()
+End Function
+
+' Call after CreateGearGlobalVariableEquations — revolve/cut use gearN_Zoffset (metres in gBossStartOffsetZM).
+Public Sub SyncBossStartOffsetFromZEquations()
+    Dim swPartDoc As SldWorks.ModelDoc2
+    Dim zOffMM As Double
+
+    If GearTrainRole <> GEAR_ROLE_STACKED Then Exit Sub
+    Set swPartDoc = swPart
+    If swPartDoc Is Nothing Then Set swPartDoc = swDoc
+    If swPartDoc Is Nothing Then Exit Sub
+
+    zOffMM = ComputeGearZoffsetMM(swPartDoc, GetCurrentGearIndex())
+    If zOffMM > 0.0000000001 Then
+        gBossStartOffsetZM = GlobalVarValueMMToM(zOffMM)
+    Else
+        gBossStartOffsetZM = GetSelectedBaseGearBodyTopZM()
+    End If
+    LogGearZStackChain "SyncBossStartOffsetFromZEquations"
+    LogGearLayoutState "SyncBossStartOffsetFromZEquations"
+End Sub
+
+' Horizontal dim on revolve profile (Right-plane X = part Z) linked to gearN_Zoffset.
+Public Sub AddRevolveProfileZOffsetDimension(ByVal zBaseM As Double, ByVal textYM As Double)
+    Dim swRefLine As SldWorks.SketchSegment
+
+    On Error Resume Next
+    If zBaseM <= 0.0000000001 Then Exit Sub
+    Set swRefLine = swSketchManager.CreateLine(0#, textYM, 0#, zBaseM, textYM, 0#)
+    If swRefLine Is Nothing Then Exit Sub
+    swRefLine.ConstructionGeometry = True
+    AddLinearDimensionToLine swRefLine, GEAR_DIM_REVOLVE_Z_OFFSET, zBaseM * MM_PER_M, zBaseM * 0.5, textYM + 0.002
+    On Error GoTo 0
+End Sub
+
 Private Function EqQuotedName(ByVal name As String) As String
     EqQuotedName = Chr(34) & name & Chr(34)
 End Function
@@ -3016,6 +3732,8 @@ Public Sub CreateGearGlobalVariableEquations()
     AddOrUpdateGlobalEquation GearGlobalVarName("HubWidth"), Format(GearGeom.HubWidthMM, "0.####")
     AddOrUpdateGlobalEquation GearGlobalVarName("GapArcLength"), Format(GearGeom.GapArcLengthMM, "0.########")
     AddOrUpdateGlobalEquation GearGlobalVarName("GapRootFillet"), Format(GearGeom.GapRootFilletMM, "0.########")
+    AddGearZStackEquationsForCurrentBuild
+    LogGearZStackChain "CreateGearGlobalVariableEquations"
     DebugPrint "CreateGearGlobalVariableEquations: OK count=" & GearGeom.numTeeth
 End Sub
 
@@ -3112,6 +3830,9 @@ Private Sub LinkRevolveAxisLayoutEquations()
     AddOrUpdateDimensionEquation GEAR_DIM_REVOLVE_RIM_WIDTH & "@" & skName, qRimW
     If GearGeom.UseHub Then
         AddOrUpdateDimensionEquation GEAR_DIM_REVOLVE_TOTAL_AXIAL & "@" & skName, qWidth
+    End If
+    If GearTrainRole = GEAR_ROLE_STACKED Or gBossStartOffsetZM > 0.0000000001 Then
+        AddOrUpdateDimensionEquation GEAR_DIM_REVOLVE_Z_OFFSET & "@" & skName, EqQuotedName(GearGlobalVarName("Zoffset"))
     End If
 End Sub
 
@@ -3576,10 +4297,9 @@ Public Sub SetGearTrainSketchOffsetFromLayout()
             gSketchOffsetXM = 0#
             gSketchOffsetYM = 0#
         End If
-        gBossStartOffsetZM = GetSelectedBaseGearBodyTopZM()
+        ' Z boss start is set in SyncBossStartOffsetFromZEquations (after gear index + Zoffset equations exist).
         DebugPrint "Stacked layout: base """ & GearTrainDrivingBodyLabel & """ centre (mm)=" & _
-            Format(gSketchOffsetXM * MM_PER_M, "0.###") & ", " & Format(gSketchOffsetYM * MM_PER_M, "0.###") & _
-            " boss start Z (mm)=" & Format(gBossStartOffsetZM * MM_PER_M, "0.###")
+            Format(gSketchOffsetXM * MM_PER_M, "0.###") & ", " & Format(gSketchOffsetYM * MM_PER_M, "0.###")
         Exit Sub
     End If
     If GearTrainRole <> GEAR_ROLE_DRIVEN Then
@@ -3822,16 +4542,28 @@ Public Function ApplyDrivingGearFromComboIndex(ByVal index As Long) As Boolean
     Dim w As Double
 
     ApplyDrivingGearFromComboIndex = False
-    If index < 0 Or index >= GearTrainDrivingComboCount Then Exit Function
+    If index < 0 Or index >= GearTrainDrivingComboCount Then
+        DebugPrint "ApplyDrivingGearFromComboIndex FAIL: invalid index=" & index & " count=" & GearTrainDrivingComboCount
+        Exit Function
+    End If
 
     partTitle = GearTrainDrivingComboPartTitle(index)
     bodyName = GearTrainDrivingComboBodyName(index)
-    If partTitle = "" Or Left$(bodyName, 1) = "(" Then Exit Function
+    If partTitle = "" Or Left$(bodyName, 1) = "(" Then
+        DebugPrint "ApplyDrivingGearFromComboIndex FAIL: empty part/body at index=" & index
+        Exit Function
+    End If
 
     Set swPartDoc = FindOpenPartDocumentByTitle(partTitle)
-    If swPartDoc Is Nothing Then Exit Function
+    If swPartDoc Is Nothing Then
+        DebugPrint "ApplyDrivingGearFromComboIndex FAIL: part not open """ & partTitle & """"
+        Exit Function
+    End If
     Set swBody = FindSolidBodyByName(swPartDoc, bodyName)
-    If Not ReadGearMetadataFromBody(swBody, swPartDoc, modMM, z1, pa, w) Then Exit Function
+    If Not ReadGearMetadataFromBody(swBody, swPartDoc, modMM, z1, pa, w) Then
+        DebugPrint "ApplyDrivingGearFromComboIndex FAIL: metadata read failed body=""" & bodyName & """"
+        Exit Function
+    End If
 
     GearTrainDrivingPartTitle = partTitle
     GearTrainDrivingBodyLabel = bodyName
@@ -3842,8 +4574,7 @@ Public Function ApplyDrivingGearFromComboIndex(ByVal index As Long) As Boolean
     GearTrainDrivingIsInternal = ReadGearIsInternalFromDoc(swPartDoc)
     SyncDrivingGearAxisReference swPartDoc
     ApplyDrivingGearFromComboIndex = True
-    DebugPrint "Driving gear from list: " & GearTrainDrivingPartTitle & " / " & GearTrainDrivingBodyLabel & _
-        " z=" & z1 & IIf(GearTrainDrivingIsInternal, " INTERNAL", " EXTERNAL") & " axis=" & GearTrainDrivingAxisName
+    LogGearTrainDrivingSelection "ApplyDrivingGearFromComboIndex"
 End Function
 
 Public Function GetPartDocFromSelectedBody(ByVal swBody As SldWorks.Body2) As SldWorks.ModelDoc2
@@ -3916,8 +4647,7 @@ Public Function PickDrivingGearBodyFromSelection() As Boolean
     GearTrainDrivingIsInternal = ReadGearIsInternalFromDoc(swPartDoc)
     SyncDrivingGearAxisReference swPartDoc
     PickDrivingGearBodyFromSelection = True
-    DebugPrint "Picked driving gear: " & GearTrainDrivingPartTitle & " / " & GearTrainDrivingBodyLabel & _
-        " z=" & z1 & " m=" & modMM & " axis=" & GearTrainDrivingAxisName
+    LogGearTrainDrivingSelection "PickDrivingGearBodyFromSelection"
 End Function
 
 Public Function ApplyDrivenGearInputsFromDrivingGear() As Boolean
@@ -3931,8 +4661,7 @@ Public Function ApplyDrivenGearInputsFromDrivingGear() As Boolean
     GearTrainCenterDistanceMM = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, GearGeom.numTeeth, _
         GearTrainDrivingIsInternal, GearGeom.IsInternal)
     ApplyDrivenGearInputsFromDrivingGear = True
-    DebugPrint "Driven gear inherits m=" & GearGeom.moduleMM & " pa=" & GearGeom.pressureAngleDeg & _
-        " C=" & Format(GearTrainCenterDistanceMM, "0.###") & " mm"
+    LogNewGearInputs "after ApplyDrivenGearInputsFromDrivingGear"
 End Function
 
 Public Function ApplyStackedGearInputsFromBaseGear() As Boolean
@@ -3942,8 +4671,7 @@ Public Function ApplyStackedGearInputsFromBaseGear() As Boolean
     GearGeom.pressureAngleDeg = GearTrainDrivingPressureDeg
     GearGeom.moduleMM = GearTrainDrivingModuleMM
     ApplyStackedGearInputsFromBaseGear = True
-    DebugPrint "Stacked gear inherits m=" & GearGeom.moduleMM & " pa=" & GearGeom.pressureAngleDeg & _
-        " width=" & Format(GearGeom.widthMM, "0.###") & " mm from form"
+    LogNewGearInputs "after ApplyStackedGearInputsFromBaseGear"
 End Function
 
 ' Sketch dimension names (InvoluteGear_*) complement custom properties on the part.
