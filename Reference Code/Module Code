@@ -1,0 +1,570 @@
+Public Sub PopulateEquations(Optional DummyArg As String)
+    a = InputBox("Pressure Angle a° = ", , 20)
+    m = InputBox("Module m[mm] = ", , 1.25)
+    z = InputBox("Number of Teeth z = ", , 9)
+    w = InputBox("Width W[mm] = ", , 10)
+    
+    Set swActConfig = ConfigMgr.ActiveConfiguration
+    ReDim swConfig(1 To 2)
+    Set swConfig(2) = ConfigMgr.AddConfiguration("Module = " & m & " x Teeth = " & z, "", "", 1, "", "")
+    
+    Set swEquationMgr = swPart.GetEquationMgr
+    If swEquationMgr Is Nothing Then
+        MsgBox "Nothing"
+    End If
+    
+    e = 0
+    longstatus = swEquationMgr.Add3(e, """a""=" & a, True, swAllConfiguration, swConfig(2).Name)
+    e = e + 1
+    
+    swEquationMgr.Add3 e, """m""=" & m, True, swAllConfiguration, swConfig(2).Name
+    e = e + 1
+    
+    swEquationMgr.Add3 e, """z""=" & z, True, swAllConfiguration, swConfig(2).Name
+    e = e + 1
+    
+    swEquationMgr.Add3 e, """w""=" & w, True, swAllConfiguration, swConfig(2).Name
+    e = e + 1
+    
+    swEquationMgr.Add3 e, """Dp""= ""m"" * ""z""", True, swAllConfiguration, Empty
+    e = e + 1
+    
+    swEquationMgr.Add3 e, """Db""=""Dp"" *cos(""a"")", True, swAllConfiguration, Empty
+    e = e + 1
+    
+    swEquationMgr.Add3 e, """rb""=""Db"" / 2 ", True, swAllConfiguration, Empty
+    e = e + 1
+    
+    swEquationMgr.Add3 e, """Da""= ""Dp"" + 2*""m""", True, swAllConfiguration, Empty
+    e = e + 1
+    
+    swEquationMgr.Add3 e, """Dd""= ""Dp"" - 2.5*""m""", True, swAllConfiguration, Empty
+    e = e + 1
+    
+    swEquationMgr.Add3 e, """QPA""= 180 - (360 / (""z"" * 4))", True, swAllConfiguration, Empty
+    e = e + 1
+    
+    swEquationMgr.Add3 e, """cQPA""= (360 / (""z"" * 4))", True, swAllConfiguration, Empty
+    e = e + 1
+    
+    swEquationMgr.Add3 e, """Ft""= ""m"" * .25", True, swAllConfiguration, Empty
+    e = e + 1
+    
+    swPart.EditRebuild
+
+End Sub
+Sub Planes(Optional DummyArg As String)
+
+    ' Select the Ref planeS & added to RefPlaneFt() & RefPlaneName()
+    ReDim RefPlaneFt(1 To 5) As SldWorks.Feature
+    ReDim RefPlaneName(1 To 5) As String
+    ftsVar = swFeatMgr.GetFeatures(True)
+    Dim j As Integer
+    j = 0
+    For Each ftVar In ftsVar
+        Set swFeat = ftVar
+        If swFeat.GetTypeName2 = "RefPlane" Then
+            j = j + 1
+            RefPlaneName(j) = swFeat.Description
+            Set swRefPlaneFtData = swFeat.GetDefinition
+            Set RefPlaneFt(j) = swFeat
+            If j = 3 Then
+                Exit For
+            End If
+        End If
+    Next
+    
+    swPart.ClearSelection
+    
+    'Create Axis
+    RefPlaneFt(1).Select True
+    boolstatus = swModelDocExt.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0, 0, 0, True, 0, Nothing, 0)
+    boolstatus = swDoc.InsertAxis2(True)
+    Set RefPlaneFt(5) = swSelMgr.GetSelectedObject5(1)
+    RefPlaneName(5) = RefPlaneFt(5).Name
+
+    swDoc.ClearSelection2 True
+    swModelDocExt.Rebuild True
+
+End Sub
+Sub Involuti(Optional DummyArg As String)
+    Set InvoluteCurve = swSketchManager.CreateEquationSpline2("""rb"" *  (sin(t) - t * cos(t))", """rb"" *  (cos(t) + t * sin(t))", _
+            "", "0", "1.5", True, 0, 0, 0, True, True)
+    
+    InvoluteCurve.Select4 False, swSelData
+    'swPart.SketchAddConstraints "sgFIXED"
+    Set swSketch = swSketchManager.ActiveSketch
+    
+    Dp = z * m
+    'DCP Circle
+    
+    Set DpCircle = swSketchManager.CreateCircleByRadius(Dp / 4000, Dp / 4000, 0, Dp / 2000)
+    DpCircle.ConstructionGeometry = True
+    
+    Set dispDim = swDoc.AddDiameterDimension2(0, 0, 0)
+    Set swSketchCurrCircle = DpCircle
+    Set swCenterPt = swSketchCurrCircle.GetCenterPoint2
+    swPart.Extension.SelectByID2 "Point1@Origin", "EXTSKETCHPOINT", 0, 0, 0, True, 0, Nothing, 0
+    swCenterPt.Select4 True, swSelData
+    swPart.SketchAddConstraints "sgCOINCIDENT"
+    
+    PeqStrg = Chr(34)
+    PeqStrg = PeqStrg & dispDim.GetNameForSelection & PeqStrg
+    PeqStrg = PeqStrg & "=""Dp"""
+    
+    Set swEquationMgr = swPart.GetEquationMgr
+    swEquationMgr.Add3 e, PeqStrg, True, swAllConfiguration, Empty
+    e = e + 1
+    
+    swPart.ClearSelection
+    swPart.EditRebuild3
+    
+    'Add reference point at the beginning of the Spline
+    boolstatus = swPart.Extension.SelectByID2("Spline2@Sketch1", "EXTSKETCHSEGMENT", 0, Db / 2000, 0, True, 0, Nothing, 0)
+    Dim vRefPointFeatures As Variant
+    vRefPointFeatures = swFeatMgr.InsertReferencePoint(2, 1, 0, 1)
+    
+    
+    
+    
+    
+End Sub
+
+Sub AnglePLine(Optional DummyArg As String)
+    'Pline would be at intersection of Dp with the Involute
+    RefPlaneFt(1).Select True
+    swSketchManager.InsertSketch True
+    Set sw2DSketch = swSketchManager.ActiveSketch
+    Set PLine = swSketchManager.CreateLine(0, 0, 0, 0, (Dp / 2000), 0)
+    PLine.Select True
+    PLine.ConstructionGeometry = True
+    
+    'Connect end point PLine to Involute & Dp Circle
+    Set swSketchLine = PLine
+    Set swPt = swSketchLine.GetEndPoint2
+    swPt.Select4 False, swSelData
+    InvoluteCurve.Select4 True, swSelData
+    swPart.SketchAddConstraints "sgCOINCIDENT"
+    
+    swPt.Select4 False, swSelData
+    DpCircle.Select4 True, swSelData
+    swPart.SketchAddConstraints "sgCOINCIDENT"
+    
+    'Connect Start point PLine to 0,0
+    Set swPt = swSketchLine.GetStartPoint2
+    swPt.Select4 False, swSelData
+    swPart.Extension.SelectByID2 "Point1@Origin", "EXTSKETCHPOINT", 0, 0, 0, True, 0, Nothing, 0
+    swPart.SketchAddConstraints "sgCOINCIDENT"
+    
+    'Calculate angle PLine vs Right Plane
+    PLine.Select4 False, swSelData
+    RefPlaneFt(3).Select2 True, 1
+    Set swPt = swSketchLine.GetEndPoint2
+    Set dispDim = swDoc.AddDimension2(swPt.X / 2, swPt.Y * 2, 0)
+    AngleDim = dispDim.GetNameForSelection
+    boolstatus = swPart.Extension.SelectByID2("Sketch2", "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+
+    swPart.BlankSketch
+    
+    swPart.ClearSelection
+    swPart.EditRebuild3
+    
+    'Add angle Plane
+    RefPlaneFt(3).Select2 True, 0
+    swModelDocExt.SelectByID2 "Axis1", "AXIS", 0, 0, 0, True, 1, Nothing, 0
+    
+    Set RefPlaneFt(4) = swFeatMgr.InsertRefPlane(16, 3, 4, 0, 0, 0)
+    RefPlaneName(4) = RefPlaneFt(4).Description
+    Set swRefPlane = RefPlaneFt(4)
+    RefPlaneFt(4).Select2 False, 0
+    
+    swPart.BlankRefGeom
+    swPart.ClearSelection
+    
+    'Add Equation for that angle
+    PeqStrg = "D1@" & RefPlaneName(4)
+    PeqStrg = Chr(34) & PeqStrg & Chr(34) & "=""QPA""-" & Chr(34) & AngleDim & Chr(34)
+    Set swEquationMgr = swPart.GetEquationMgr
+    swEquationMgr.Add3 e, PeqStrg, True, swAllConfiguration, Empty
+    e = e + 1
+    swPart.ViewZoomtofit2
+End Sub
+Sub CuttingSketch(Optional DummyArg As String)
+
+    'Sketch to cut
+    RefPlaneFt(1).Select True
+    swSketchManager.InsertSketch True
+    Set sw2DSketch = swSketchManager.ActiveSketch
+
+    'Spline
+    Dim pointArray As Variant
+    Dim points() As Double
+    ReDim points(0 To 5) As Double
+    points(0) = 0
+    points(1) = 0
+    points(2) = 0
+    points(3) = 0.001
+    points(4) = 0.005
+    points(5) = 0
+    pointArray = points
+    
+    Set Spline = swSketchManager.CreateSpline((pointArray))
+    
+    boolstatus = swPart.Extension.SelectByID2("Point1", "SKETCHPOINT", points(0), points(1), 0, False, 0, Nothing, 0)
+    boolstatus = swPart.Extension.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0, 0, 0, True, 0, Nothing, 0)
+    swPart.SketchAddConstraints "sgCOINCIDENT"
+    swPart.ClearSelection2 True
+    
+    boolstatus = swPart.Extension.SelectByID2("Point2", "SKETCHPOINT", 0.001, 0.005, 0, False, 0, Nothing, 0)
+    boolstatus = swPart.Extension.SelectByID2("Point1", "DATUMPOINT", 0, 0, 0, True, 0, Nothing, 0)
+    swPart.SketchAddConstraints "sgCOINCIDENT"
+    swPart.ClearSelection2 True
+    
+    boolstatus = swPart.Extension.SelectByID2("Spline1", "SKETCHSEGMENT", -6.13624918302941E-05, 4.99306524218883E-03, 3.45228267801175E-02, False, 0, Nothing, 0)
+    boolstatus = swPart.Extension.SelectByID2("Spline2@Sketch1", "EXTSKETCHSEGMENT", 3.90055017806271E-04, 6.18645840589166E-03, 0, True, 0, Nothing, 0)
+    swPart.SketchAddConstraints "sgTANGENT"
+    swPart.ClearSelection2 True
+    
+    boolstatus = swPart.Extension.SelectByID2("Spline1", "SKETCHSEGMENT", -6.13624918302941E-05, 4.99306524218883E-03, 3.45228267801175E-02, False, 0, Nothing, 0)
+    boolstatus = swPart.Extension.SelectByID2("Line1@Sketch2", "EXTSKETCHSEGMENT", 6.4914690122873E-05, 4.3550853222852E-03, 0, True, 0, Nothing, 0)
+    swPart.SketchAddConstraints "sgTANGENT"
+    swPart.ClearSelection2 True
+    
+    boolstatus = swPart.Extension.SelectByID2("Spline2@Sketch1", "EXTSKETCHSEGMENT", 4.87193312135678E-03, 1.32227954463658E-02, 0, False, 0, Nothing, 0)
+    boolstatus = swPart.SketchManager.SketchUseEdge3(False, False)
+    
+    swPart.ClearSelection
+    swPart.EditRebuild3
+End Sub
+
+Sub FirstBodySketch(Optional DummyArg As String)
+   
+    RefPlaneFt(1).Select True
+    swSketchManager.InsertSketch True
+    Set sw2DSketch = swSketchManager.ActiveSketch
+    
+    swSketchManager.AutoSolve = True
+    swSketchManager.AddToDB = False
+    Da = Dp + 2 * m
+    Set OutCircle = swSketchManager.CreateCircleByRadius(0, 0, 0, Da / 2000)
+
+    Set dispDim = swDoc.AddDiameterDimension2(0, 0, 0)
+    PeqStrg = Chr(34)
+    PeqStrg = PeqStrg & dispDim.GetNameForSelection & PeqStrg
+    PeqStrg = PeqStrg & "=""Da"""
+    Set swEquationMgr = swPart.GetEquationMgr
+    swEquationMgr.Add3 e, PeqStrg, True, swAllConfiguration, Empty
+    e = e + 1
+    
+    Set VLine = swSketchManager.CreateLine(0, 0, 0, Da * Cos(Pi / 4) / 2000, Da * Cos(Pi / 4) / 2000, 0)
+    RefPlaneFt(4).Select True
+    swPart.SketchAddConstraints "sgCOLINEAR"
+    
+    Set HLine = swSketchManager.CreateLine(0, 0, 0, -Da / 2000, 0, 0)
+    
+    'Trim
+    OutCircle.Select4 True, swSelData
+    swSketchManager.SketchTrim swSketchTrimClosest, Da * Cos(Pi / 4) / 2000, -Da * Cos(Pi / 4) / 2000, 0
+    swPart.ClearSelection2 True
+    
+    Set swFeat = swFeatMgr.FeatureExtrusion3(True, _
+                                            False, _
+                                             False, _
+                                             0, _
+                                             0, _
+                                             0.1, _
+                                             0#, _
+                                             False, _
+                                             False, _
+                                             False, _
+                                             False, _
+                                             1.74532925199433E-02, _
+                                             1.74532925199433E-02, _
+                                             False, _
+                                             False, _
+                                             False, _
+                                             False, _
+                                             True, _
+                                             True, _
+                                             True, _
+                                             0, _
+                                             0, _
+                                             False)
+                
+    swPart.SelectionManager.EnableContourSelection = False
+    swPart.ClearSelection2 True
+    
+    Set swEquationMgr = swPart.GetEquationMgr
+    PeqStrg = "D1@Boss-Extrude1"
+    PeqStrg = Chr(34) & PeqStrg & Chr(34) & "=""w"""
+    swEquationMgr.Add3 e, PeqStrg, True, swAllConfiguration, Empty
+    e = e + 1
+    
+    'Cut
+    boolstatus = swPart.Extension.SelectByID2("Sketch3", "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+    Set swFeat = swFeatMgr.FeatureCut4(False, False, False, 1, 1, 0.01, 0.01, False, False, False, False, 1.74532925199433E-02, 1.74532925199433E-02, False, False, False, False, False, True, True, True, True, False, 0, 0, False, False)
+    swPart.SelectionManager.EnableContourSelection = False
+
+    
+End Sub
+   
+Sub HalfPitchBase(Optional DummyArg As String)
+    
+    swSketchManager.AutoSolve = True
+    swSketchManager.AddToDB = False
+
+    RefPlaneFt(1).Select True
+    swSketchManager.InsertSketch True
+    Set sw2DSketch = swSketchManager.ActiveSketch
+    
+    'Quarter pitch Angle in degrees
+    QPA = 360 / (4 * z)
+    'Quarter pitch Angle in radians
+    QPAradians = QPA * Pi / 180
+    Dd = Dp - 2.5 * m
+    Set OutCircleArc = swSketchManager.CreateCircleByRadius(0, 0, 0, Dd / 2000)
+    'Set OutCircleArc = swSketchManager.CreateArc(0, 0, 0, 0, Dd / 2000, 0, -(Dd / 2000) * Sin(QPAradians), (Dd / 2000) * Cos(QPAradians), 0, 1)
+    Set dispDim = swDoc.AddDiameterDimension2(0, 0, 0)
+    PeqStrg = Chr(34)
+    PeqStrg = PeqStrg & dispDim.GetNameForSelection & PeqStrg
+    PeqStrg = PeqStrg & "=""Dd"""
+    Set swEquationMgr = swPart.GetEquationMgr
+    swEquationMgr.Add3 e, PeqStrg, True, swAllConfiguration, Empty
+    e = e + 1
+    
+    Set VLineQP = swSketchManager.CreateLine(0, 0, 0, (Dd / 2000) * Sin(QPAradians), (Dd / 2000) * Cos(QPAradians), 0)
+    RefPlaneFt(4).Select True
+    swPart.SketchAddConstraints "sgCOLINEAR"
+
+    Set ALineQP = swSketchManager.CreateLine(0, 0, 0, -(Dd / 2000) * Sin(QPAradians), (Dd / 2000) * Cos(QPAradians), 0)
+   
+    'Place dimension angle ALineQP vs Right Plane
+    Set swSketchLine = ALineQP
+    Set swPt = swSketchLine.GetEndPoint2
+
+    ALineQP.Select4 False, swSelData
+    RefPlaneFt(3).Select2 True, 1
+    
+    Set dispDim = swDoc.AddDimension2(swPt.X / 2, swPt.Y, 0)
+    AngleDim = dispDim.GetNameForSelection
+    
+    'Add Equation for that angle
+    PeqStrg = AngleDim
+    PeqStrg = Chr(34) & PeqStrg & Chr(34) & "=""cQPA"""
+    Set swEquationMgr = swPart.GetEquationMgr
+    swEquationMgr.Add3 e, PeqStrg, True, swAllConfiguration, Empty
+    e = e + 1
+    
+    'Connect end point Line to Dd Circle
+    swPt.Select4 False, swSelData
+    OutCircleArc.Select4 True, swSelData
+    swPart.SketchAddConstraints "sgCOINCIDENT"
+    
+    Set swSketchLine = VLineQP
+    Set swPt = swSketchLine.GetEndPoint2
+    swPt.Select4 False, swSelData
+    OutCircleArc.Select4 True, swSelData
+    swPart.SketchAddConstraints "sgCOINCIDENT"
+
+    'Trim
+    OutCircleArc.Select4 True, swSelData
+    swSketchManager.SketchTrim swSketchTrimClosest, Da * Cos(Pi / 4) / 2000, -Da * Cos(Pi / 4) / 2000, 0
+    
+    'Add point Dd for later selection edge coordinates
+    
+    Set swDdPt = swSketchManager.CreatePoint(-(Dd / 2000) * Sin(QPAradians / 4), (Dd / 2000) * Cos(QPAradians / 4), 0)
+    swPart.SetPickMode
+    swPart.ClearSelection2 True
+    swDdPt.Select4 False, swSelData
+    boolstatus = swPart.Extension.SelectByID2("Spline1@Sketch3", "EXTSKETCHSEGMENT", -5.48344648784861E-06, 5.0967631078243E-03, 0, True, 0, Nothing, 0)
+    swPart.SketchAddConstraints "sgCOINCIDENT"
+    swPart.ClearSelection2 True
+    
+    swDdPt.Select4 False, swSelData
+    boolstatus = swPart.Extension.SelectByID2("Arc1", "SKETCHSEGMENT", -3.01313034679196E-03, 6.01603416424543E-03, 3.41634848231787E-02, True, 0, Nothing, 0)
+    swPart.SketchAddConstraints "sgCOINCIDENT"
+    swPart.ClearSelection2 True
+
+    'Add point Da for later selection edge coordinates
+    Set swDaPt = swPart.SketchManager.CreatePoint(0, Da / 1500, 0#)
+    swPart.SetPickMode
+    swPart.ClearSelection2 True
+    swDaPt.Select4 False, swSelData
+    boolstatus = swPart.Extension.SelectByID2("Spline2@Sketch1", "EXTSKETCHSEGMENT", 1.36416786530609E-03, 7.14886001632257E-03, 0, True, 0, Nothing, 0)
+    swPart.SketchAddConstraints "sgCOINCIDENT"
+    
+    swPart.ClearSelection2 True
+    swDaPt.Select4 False, swSelData
+    boolstatus = swPart.Extension.SelectByID2("Arc1@Sketch4", "EXTSKETCHSEGMENT", 3.20093299165155E-04, 6.86754434130786E-03, 0, True, 0, Nothing, 0)
+    swPart.SketchAddConstraints "sgCOINCIDENT"
+    
+    'Extrusion
+    Set swFeat = swFeatMgr.FeatureExtrusion3(True, False, False, 1, 0, 0.01, 0.01, False, False, False, False, 1.74532925199433E-02, 1.74532925199433E-02, False, False, False, False, True, False, False, 0, 0, False)
+    swPart.ClearSelection2 True
+    
+
+End Sub
+    
+Sub Tipfillet(Optional DummyArg As String)
+
+    Dim swFeatData As Object
+    boolstatus = swPart.Extension.SelectByRay(1.5 * swDaPt.X, 1.5 * swDaPt.Y, w / 2000, swDaPt.X, swDaPt.Y, w / 2000, 0.00000000000001, 1, True, 1, 0)
+    swPart.ClearSelection2 True
+    boolstatus = swPart.Extension.SelectByRay(1.5 * swDaPt.X, 1.5 * swDaPt.Y, w / 2000, swDaPt.X, swDaPt.Y, w / 2000, 0.00000000000001, 1, True, 1, 0)
+    Set swFeatData = swFeatMgr.CreateDefinition(swFmFillet)
+    swFeatData.Initialize swConstRadiusFillet
+    
+    Dim swEdge As SldWorks.Edge
+    'Dim swEdge As Object
+    Dim edgesArray(0) As Object
+    Set swEdge = swSelMgr.GetSelectedObject6(1, 1)
+    Set edgesArray(0) = swEdge
+    Dim edgesVar As Variant
+    edgesVar = edgesArray
+    swFeatData.Edges = edgesVar
+    
+    swFeatData.AsymmetricFillet = False
+    swFeatData.DefaultRadius = m * 0.25 / 1000
+    swFeatData.ConicTypeForCrossSectionProfile = swFeatureFilletCircular
+    swFeatData.CurvatureContinuous = False
+    swFeatData.ConstantWidth = m * 0.25 / 1000
+    swFeatData.IsMultipleRadius = False
+    swFeatData.OverflowType = swFilletOverFlowType_Default
+    
+    
+    Set swFeat = swFeatMgr.CreateFeature(swFeatData)
+    swPart.ClearSelection2 True
+    
+    'D1@Fillet1
+    
+    Set swEquationMgr = swPart.GetEquationMgr
+    PeqStrg = "D1@Fillet1"
+    PeqStrg = Chr(34) & PeqStrg & Chr(34) & "=""Ft"""
+    swEquationMgr.Add3 e, PeqStrg, True, swAllConfiguration, Empty
+    e = e + 1
+    swPart.ClearSelection2 True
+    
+End Sub
+Sub Rootfillet(Optional DummyArg As String)
+
+    Dim swFeatData As Object
+    boolstatus = swPart.Extension.SelectByRay(1.5 * swDdPt.X, 1.5 * swDdPt.Y, w / 2000, swDdPt.X, swDdPt.Y, w / 2000, 0.00000000000001, 1, True, 1, 0)
+    swPart.ClearSelection2 True
+    boolstatus = swPart.Extension.SelectByRay(1.5 * swDdPt.X, 1.5 * swDdPt.Y, w / 2000, swDdPt.X, swDdPt.Y, w / 2000, 0.00000000000001, 1, True, 1, 0)
+    Set swFeatData = swFeatMgr.CreateDefinition(swFmFillet)
+    swFeatData.Initialize swConstRadiusFillet
+    
+    Dim swEdge As SldWorks.Edge
+    'Dim swEdge As Object
+    Dim edgesArray(0) As Object
+    Set swEdge = swSelMgr.GetSelectedObject6(1, 1)
+    Set edgesArray(0) = swEdge
+    Dim edgesVar As Variant
+    edgesVar = edgesArray
+    swFeatData.Edges = edgesVar
+    
+    swFeatData.AsymmetricFillet = False
+    swFeatData.DefaultRadius = m * 0.25 / 1000
+    swFeatData.ConicTypeForCrossSectionProfile = swFeatureFilletCircular
+    swFeatData.CurvatureContinuous = False
+    swFeatData.ConstantWidth = m * 0.25 / 1000
+    swFeatData.IsMultipleRadius = False
+    swFeatData.OverflowType = swFilletOverFlowType_Default
+    
+    
+    Set swFeat = swFeatMgr.CreateFeature(swFeatData)
+    swPart.ClearSelection2 True
+    
+    
+    Set swEquationMgr = swPart.GetEquationMgr
+    PeqStrg = "D1@Fillet2"
+    PeqStrg = Chr(34) & PeqStrg & Chr(34) & "=""Ft"""
+    swEquationMgr.Add3 e, PeqStrg, True, swAllConfiguration, Empty
+    e = e + 1
+    swPart.ClearSelection2 True
+    
+End Sub
+
+
+Sub Mirror(Optional DummyArg As String)
+    
+    'Mirror
+    
+    boolstatus = swPart.Extension.SelectByID2("Plane1", "PLANE", 0, 0, 0, True, 0, Nothing, 0)
+    boolstatus = swPart.Extension.SelectByID2("Fillet2", "SOLIDBODY", 0, 0, 0, True, 0, Nothing, 0)
+    
+    swPart.ClearSelection2 True
+    boolstatus = swPart.Extension.SelectByID2("Plane1", "PLANE", 0, 0, 0, False, 2, Nothing, 0)
+    boolstatus = swPart.Extension.SelectByID2("Fillet2", "SOLIDBODY", 0, 0, 0, True, 256, Nothing, 0)
+
+    Set swFeat = swFeatMgr.InsertMirrorFeature(True, False, True, False)
+    swPart.EditRebuild3
+    
+End Sub
+    
+Sub Pattern(Optional DummyArg As String)
+   
+    'Pattern
+    boolstatus = swPart.Extension.SelectByID2("Mirror1", "SOLIDBODY", 0, 0, 0, True, 256, Nothing, 0)
+    boolstatus = swPart.Extension.SelectByID2("Axis1", "AXIS", 0, 0, 0, True, 1, Nothing, 0)
+    swPart.ClearSelection2 True
+    boolstatus = swPart.Extension.SelectByID2("Mirror1", "SOLIDBODY", 0, 0, 0, False, 256, Nothing, 0)
+    boolstatus = swPart.Extension.SelectByID2("Axis1", "AXIS", 0, 0, 0, True, 1, Nothing, 0)
+    
+    Dim swFeatData As Object
+    Set swFeatData = swFeatMgr.CreateDefinition(swFeatureNameID_e.swFmCirPattern)
+    swFeatData.Direction2 = False
+    swFeatData.EqualSpacing = True
+    swFeatData.GeometryPattern = False
+    swFeatData.ReverseDirection = False
+    swFeatData.Spacing = 6.2831853071796
+    swFeatData.TotalInstances = z
+    swFeatData.VarySketch = False
+    Set swFeat = swFeatMgr.CreateFeature(swFeatData)
+    
+    
+    PeqStrg = "D1@CirPattern1"
+    PeqStrg = Chr(34) & PeqStrg & Chr(34) & "=""z"""
+    Set swEquationMgr = swPart.GetEquationMgr
+    swEquationMgr.Add3 e, PeqStrg, True, swAllConfiguration, Empty
+    e = e + 1
+
+    
+    
+    
+    
+End Sub
+
+Sub DedendumBody(Optional DummyArg As String)
+
+    RefPlaneFt(1).Select True
+    swSketchManager.InsertSketch True
+    Set sw2DSketch = swSketchManager.ActiveSketch
+    Dd = Dp - 2.5 * m
+    Set DedendumCircle = swSketchManager.CreateCircleByRadius(0, 0, 0, Dd / 2000)
+    Set dispDim = swDoc.AddDiameterDimension2(0, 0, 0)
+    PeqStrg = Chr(34)
+    PeqStrg = PeqStrg & dispDim.GetNameForSelection & PeqStrg
+    PeqStrg = PeqStrg & "=""Dd"""
+    Set swEquationMgr = swPart.GetEquationMgr
+    swEquationMgr.Add3 e, PeqStrg, True, swAllConfiguration, Empty
+    e = e + 1
+    Set swFeat = swFeatMgr.FeatureExtrusion3(True, False, False, 1, 0, 0.01, 0.01, False, False, False, False, 1.74532925199433E-02, 1.74532925199433E-02, False, False, False, False, True, False, False, 0, 0, False)
+    swPart.SelectionManager.EnableContourSelection = False
+    swPart.ClearSelection2 True
+    
+    boolstatus = swPart.Extension.SelectByID2("Sketch1", "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+    swPart.BlankSketch
+    
+    boolstatus = swPart.Extension.SelectByID2("Point1", "DATUMPOINT", 0, 0, 0, True, 0, Nothing, 0)
+    swPart.BlankRefGeom
+
+    
+End Sub
+
+    
+    
+
+
+
+

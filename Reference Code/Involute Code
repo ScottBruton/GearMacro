@@ -1,0 +1,110 @@
+Option Explicit
+
+Public swApp As SldWorks.SldWorks
+Public swDoc As SldWorks.ModelDoc2
+Public swPart As SldWorks.PartDoc
+
+Public ConfigMgr As SldWorks.ConfigurationManager
+Public swConfig() As SldWorks.Configuration
+Public swActConfig As SldWorks.Configuration
+Public swEquationMgr As SldWorks.EquationMgr
+Public swModelDocExt As SldWorks.ModelDocExtension
+Public swFeatMgr As SldWorks.FeatureManager
+Public swFeat As SldWorks.Feature
+Public swSelMgr As SldWorks.SelectionMgr
+Public swSketchManager As SldWorks.SketchManager
+
+Public sw2DSketch As SldWorks.Sketch
+
+Public InvoluteCurve As SketchSegment
+Public DpCircle As SketchSegment
+Public OutCircle As SketchSegment
+Public OutCircleArc As SketchSegment
+Public DedendumCircle As SketchSegment
+Public Spline As SketchSegment
+
+Public swSketchCurrCircle As SldWorks.SketchArc
+Public swCenterPt As SldWorks.SketchPoint
+
+Public PLine As SketchSegment
+Public VLineQP As SketchSegment
+Public ALineQP As SketchSegment
+Public VLine As SketchSegment
+Public HLine As SketchSegment
+Public swSketchLine As SldWorks.SketchLine
+Public swPt As SldWorks.SketchPoint
+Public swDdPt As SldWorks.SketchPoint
+Public swDaPt As SldWorks.SketchPoint
+
+'Public swDim As SldWorks.Dimension
+'Public dispDim As SldWorks.DisplayDimension
+
+Public RefPlaneName() As String
+Public RefPlaneFt() As SldWorks.Feature
+
+Public swSketch As SldWorks.Sketch
+Public swSelData As SldWorks.SelectData
+
+Public a, b, c, d, rb, ra, rd, m, Dp, rp, Db, Da, Dd, w, QPA, QPAradians, Pi  As Double
+Public z As Integer
+Public e, longstatus As Long
+
+Public PeqStrg, AngleDim As String
+
+Public ftVar, ftsVar As Variant
+
+
+Sub main()
+    Set swApp = Application.SldWorks
+    Set swDoc = swApp.NewPart
+    Set swPart = swDoc
+    Set swModelDocExt = swDoc.Extension
+    swModelDocExt.SetUserPreferenceInteger swUserPreferenceIntegerValue_e.swUnitsLinear, _
+                            swUserPreferenceOption_e.swDetailingNoOptionSpecified, swMM
+    swModelDocExt.SetUserPreferenceInteger swUserPreferenceIntegerValue_e.swUnitsLinearDecimalPlaces, _
+                            swUserPreferenceOption_e.swDetailingNoOptionSpecified, 6
+    swModelDocExt.SetUserPreferenceInteger swUserPreferenceIntegerValue_e.swUnitsAngularDecimalPlaces, _
+                            swUserPreferenceOption_e.swDetailingNoOptionSpecified, 6
+    Pi = 3.14159265358979
+    swApp.SetUserPreferenceIntegerValue swUserPreferenceIntegerValue_e.swShowEquationPotentialCircularReferencesMessage, 2
+    Set ConfigMgr = swDoc.ConfigurationManager
+    Set swSketchManager = swPart.SketchManager
+    Set swFeatMgr = swDoc.FeatureManager
+    Set swSelMgr = swDoc.SelectionManager
+    Set swEquationMgr = swPart.GetEquationMgr
+    
+    swEquationMgr.AutomaticRebuild = True
+    swEquationMgr.AngularEquationUnits = swAngularEquationUnitsDegrees
+    swPart.EditRebuild
+    
+    PopulateEquations
+    Planes
+    swSketchManager.AutoSolve = False
+    swSketchManager.AddToDB = True
+    Set swSelData = swSelMgr.CreateSelectData
+    
+    '#######################################################################
+    Involuti
+    AnglePLine
+    CuttingSketch
+    FirstBodySketch
+    HalfPitchBase
+    Tipfillet
+    Rootfillet
+    Mirror
+    Pattern
+    DedendumBody
+    
+    '#######################################################################
+    
+
+    swPart.ViewZoomtofit2
+    swPart.ClearSelection
+    swPart.EditRebuild3
+    
+    
+    
+End Sub
+
+
+

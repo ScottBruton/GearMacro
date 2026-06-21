@@ -1,0 +1,979 @@
+' UserForm1 Code Module
+' Copy into the UserForm1 code module in your VBA project.
+'
+' FORM SHOW MODE: main() uses Show vbModeless + DoEvents loop until form closes (required for SW body pick).
+' SW UserForms have no ShowModal property — modeless is only vbModeless in code.
+'
+' ADD THESE CONTROLS IN THE VBA FORM DESIGNER (names must match):
+'   optDrivingGear   OptionButton  Caption "Driving gear"   GroupName = "GearRole"
+'   optDrivenGear    OptionButton  Caption "Driven gear"    GroupName = "GearRole"
+'   optStackedGear   OptionButton  Caption "Stacked"        GroupName = "GearRole"
+'   fraDrivenGear    Frame         Caption "Driven gear layout" (stays visible for Stacked too if picker controls are inside it)
+'   lblDrivingGear   Label         Caption "Driving gear:"
+'   btnCancel / cbCancel / btnClose — call CloseGearForm (ends main() DoEvents loop)
+'   cboDrivingGearBody ComboBox    Style=2 — macro gears from all open parts
+'                                  Bodies named ""teethT pitchDia"" (e.g. 9T 11.25); matching ref axis ""9T 11.25 Axis""
+'   tbDrivingGearBody TextBox      Optional summary; Locked=True
+'   btnRefreshDrivingGear CommandButton Caption "Refresh list" (or keep btnPickDrivingBody name)
+'   lblMeshAngle     Label         Caption "Mesh angle (deg, 0=inline with driving gear):"
+'   tbMeshAngle      TextBox       default "0"
+'   lblTrainCenter   Label         Caption "Centre distance:"
+'   tbTrainCenter    TextBox       Locked=True (read-only, shows C = m(z1+z2)/2)
+'   fraManufacturing Frame
+'   cboMfgMethod / cboMfgMethods  ComboBox Style=2 — items filled in code
+'   tbCenterClearance OR TextBox1 (in fraManufacturing) = centre clearance added to C (mm)
+'   tbBacklash OR TextBox2 = backlash at pitch circle (mm), added to layout C
+'   tbTrainCenterAdjusted OR TextBox3 = read-only adjusted centre distance (mm)
+'
+'   optExternalGear   OptionButton  Caption "External"   GroupName = "GearType"
+'   optInternalGear    OptionButton  Caption "Internal (ring)"   GroupName = "GearType"
+'
+'   tbHubDia         TextBox       Optional hub OD (mm); blank = 40% of pitch diameter
+'   tbShaftDia       TextBox       Optional bore/shaft dia (mm); blank = 10 mm
+'   chkUseHub        CheckBox      Caption "Use hub" — default unchecked; stacked gears never use hub
+'
+
+Private Sub UserForm_Initialize()
+    On Error Resume Next
+    tbPressureAngle.Text = "20"
+    tbModule.Text = "1.25"
+    tbTeeth.Text = "100"
+    tbWidth.Text = "10"
+    If ControlExists("tbHubDia") Then tbHubDia.Text = ""
+    If ControlExists("tbShaftDia") Then tbShaftDia.Text = ""
+    If ControlExists("chkUseHub") Then chkUseHub.Value = False
+
+    If ControlExists("optDrivingGear") Then optDrivingGear.Value = True
+    If ControlExists("optExternalGear") Then optExternalGear.Value = True
+    If ControlExists("tbMeshAngle") Then tbMeshAngle.Text = "0"
+    SyncGearTypeFromForm
+
+    InitMfgMethodCombo
+    InitMfgControlTooltips
+
+    EnsureStackedGearOptionControl
+    UpdateGearRoleUI
+    On Error GoTo 0
+
+    On Error Resume Next
+    ValidateInputs
+    UpdateGearCalculations
+    On Error GoTo 0
+End Sub
+
+Private Function ControlExists(ByVal ctrlName As String) As Boolean
+    ControlExists = Not (FindControlByName(Me, ctrlName) Is Nothing)
+End Function
+
+Private Function GetOptionValue(ByVal ctrlName As String) As Boolean
+    Dim ctrl As Object
+    GetOptionValue = False
+    Set ctrl = FindControlByName(Me, ctrlName)
+    If ctrl Is Nothing Then Exit Function
+    On Error Resume Next
+    GetOptionValue = ctrl.Value
+    On Error GoTo 0
+End Function
+
+Private Sub SyncGearTypeFromForm()
+    GearGeom.IsInternal = GetOptionValue("optInternalGear")
+End Sub
+
+' Controls inside a Frame are not on Me.Controls — use FindControlByName for get/set/visible
+Private Sub SetFormTextBox(ByVal ctrlName As String, ByVal value As String)
+    Dim ctrl As Object
+    Set ctrl = FindControlByName(Me, ctrlName)
+    If ctrl Is Nothing Then Exit Sub
+    On Error Resume Next
+    ctrl.Text = value
+    On Error GoTo 0
+End Sub
+
+Private Function GetFormTextBox(ByVal ctrlName As String) As String
+    Dim ctrl As Object
+    GetFormTextBox = ""
+    Set ctrl = FindControlByName(Me, ctrlName)
+    If ctrl Is Nothing Then Exit Function
+    On Error Resume Next
+    GetFormTextBox = ctrl.Text
+    On Error GoTo 0
+End Function
+
+Private Sub SetFormControlVisible(ByVal ctrlName As String, ByVal visible As Boolean)
+    Dim ctrl As Object
+    Set ctrl = FindControlByName(Me, ctrlName)
+    If ctrl Is Nothing Then Exit Sub
+    On Error Resume Next
+    ctrl.Visible = visible
+    On Error GoTo 0
+End Sub
+
+Private Function FindControlByName(ByVal parent As Object, ByVal ctrlName As String) As Object
+    Dim c As Object
+    On Error Resume Next
+    Set FindControlByName = parent.Controls(ctrlName)
+    If Not FindControlByName Is Nothing Then Exit Function
+    On Error GoTo 0
+    For Each c In parent.Controls
+        If TypeName(c) = "Frame" Then
+            Set FindControlByName = FindControlByName(c, ctrlName)
+            If Not FindControlByName Is Nothing Then Exit Function
+        End If
+    Next c
+End Function
+
+Private Function GetManufacturingFrame() As Object
+    Set GetManufacturingFrame = FindControlByName(Me, "fraManufacturing")
+End Function
+
+' Manufacturing combo only (do not use cboDrivingGearBody)
+Private Function GetMfgMethodCombo() As Object
+    Dim fra As Object
+    Dim names As Variant
+    Dim i As Long
+
+    Set GetMfgMethodCombo = Nothing
+    Set fra = GetManufacturingFrame()
+    names = Array("cboMfgMethods", "cboMfgMethod", "ComboBox3")
+    For i = LBound(names) To UBound(names)
+        If Not fra Is Nothing Then
+            Set GetMfgMethodCombo = FindControlByName(fra, CStr(names(i)))
+        Else
+            Set GetMfgMethodCombo = FindControlByName(Me, CStr(names(i)))
+        End If
+        If Not GetMfgMethodCombo Is Nothing Then Exit Function
+    Next i
+End Function
+
+Private Function GetMfgClearanceTextBox() As Object
+    Dim fra As Object
+    Dim names As Variant
+    Dim i As Long
+    Set fra = GetManufacturingFrame()
+    names = Array("tbCenterClearance", "TextBox1")
+    For i = LBound(names) To UBound(names)
+        If Not fra Is Nothing Then
+            Set GetMfgClearanceTextBox = FindControlByName(fra, CStr(names(i)))
+        Else
+            Set GetMfgClearanceTextBox = FindControlByName(Me, CStr(names(i)))
+        End If
+        If Not GetMfgClearanceTextBox Is Nothing Then Exit Function
+    Next i
+End Function
+
+Private Function GetMfgBacklashTextBox() As Object
+    Dim fra As Object
+    Dim names As Variant
+    Dim i As Long
+    Set fra = GetManufacturingFrame()
+    names = Array("tbBacklash", "TextBox2")
+    For i = LBound(names) To UBound(names)
+        If Not fra Is Nothing Then
+            Set GetMfgBacklashTextBox = FindControlByName(fra, CStr(names(i)))
+        Else
+            Set GetMfgBacklashTextBox = FindControlByName(Me, CStr(names(i)))
+        End If
+        If Not GetMfgBacklashTextBox Is Nothing Then Exit Function
+    Next i
+End Function
+
+Private Function GetMfgAdjustedCenterTextBox() As Object
+    Dim fra As Object
+    Dim names As Variant
+    Dim i As Long
+    Set fra = GetManufacturingFrame()
+    names = Array("tbTrainCenterAdjusted", "TextBox3")
+    For i = LBound(names) To UBound(names)
+        If Not fra Is Nothing Then
+            Set GetMfgAdjustedCenterTextBox = FindControlByName(fra, CStr(names(i)))
+        Else
+            Set GetMfgAdjustedCenterTextBox = FindControlByName(Me, CStr(names(i)))
+        End If
+        If Not GetMfgAdjustedCenterTextBox Is Nothing Then Exit Function
+    Next i
+End Function
+
+Private Sub SetMfgTextBox(ByVal ctrl As Object, ByVal value As String)
+    On Error Resume Next
+    If ctrl Is Nothing Then Exit Sub
+    ctrl.Text = value
+    On Error GoTo 0
+End Sub
+
+Private Function GetMfgTextBoxValue(ByVal ctrl As Object) As String
+    GetMfgTextBoxValue = ""
+    On Error Resume Next
+    If Not ctrl Is Nothing Then GetMfgTextBoxValue = Trim$(ctrl.Text)
+    On Error GoTo 0
+End Function
+
+Private Sub SetControlTip(ByVal ctrlName As String, ByVal tip As String, Optional ByVal searchInFrame As String = "")
+    Dim parent As Object
+    Dim ctrl As Object
+    Set parent = Me
+    If searchInFrame <> "" Then Set parent = FindControlByName(Me, searchInFrame)
+    If parent Is Nothing Then Set parent = Me
+    Set ctrl = FindControlByName(parent, ctrlName)
+    If ctrl Is Nothing Then Exit Sub
+    On Error Resume Next
+    ctrl.ControlTipText = tip
+    On Error GoTo 0
+End Sub
+
+Private Sub SetControlTipOnObject(ByVal ctrl As Object, ByVal tip As String)
+    On Error Resume Next
+    If ctrl Is Nothing Then Exit Sub
+    ctrl.ControlTipText = tip
+    On Error GoTo 0
+End Sub
+
+Private Function AllComboBoxesOnForm(ByVal parent As Object) As Collection
+    Dim result As New Collection
+    Dim c As Object
+    Dim subC As Object
+    For Each c In parent.Controls
+        If TypeName(c) = "ComboBox" Then result.Add c
+        If TypeName(c) = "Frame" Then
+            For Each subC In AllComboBoxesOnForm(c)
+                result.Add subC
+            Next subC
+        End If
+    Next c
+    Set AllComboBoxesOnForm = result
+End Function
+
+Private Sub InitMfgMethodCombo()
+    Dim cb As Object
+    On Error Resume Next
+    Set cb = GetMfgMethodCombo()
+    If cb Is Nothing Then Exit Sub
+    If cb.ListCount > 0 Then Exit Sub
+    With cb
+        .Clear
+        .Style = 2
+        .AddItem "Nominal (CAD)"
+        .AddItem "3D print"
+        .AddItem "CNC"
+        .AddItem "OTS (catalog)"
+        .ListIndex = 0
+    End With
+    ApplyMfgMethodDefaults
+    On Error GoTo 0
+End Sub
+
+Private Sub UserForm_Activate()
+    InitMfgMethodCombo
+    On Error Resume Next
+    If GetOptionValue("optDrivenGear") Then RefreshDrivingGearBodyCombo
+    On Error GoTo 0
+End Sub
+
+Private Sub ApplyMfgMethodDefaults()
+    Dim cb As Object
+    Dim clr As String
+    Dim bl As String
+
+    On Error Resume Next
+    Set cb = GetMfgMethodCombo()
+    If cb Is Nothing Then Exit Sub
+
+    Select Case cb.ListIndex
+        Case 1          ' 3D print
+            clr = "0.15"
+            bl = "0.10"
+        Case 2          ' CNC
+            clr = "0.03"
+            bl = "0"
+        Case Else       ' Nominal (CAD), OTS (catalog)
+            clr = "0"
+            bl = "0"
+    End Select
+
+    SetMfgTextBox GetMfgClearanceTextBox(), clr
+    SetMfgTextBox GetMfgBacklashTextBox(), bl
+    UpdateTrainCenterDistance
+    On Error GoTo 0
+End Sub
+
+Private Sub InitMfgControlTooltips()
+    Dim tipMethod As String
+    Dim tipClr As String
+    Dim tipBl As String
+    Dim tipAdj As String
+
+    tipMethod = "Preset centre clearance and backlash for the selected process. Values fill automatically; you can edit them."
+    tipClr = "Extra centre distance added to the nominal value (mm). Covers assembly clearance, print shrink, and housing tolerance. Added when placing the driven gear."
+    tipBl = "Backlash: circumferential gap between mating teeth at the pitch circle (mm). Prevents binding as teeth mesh; larger for 3D print, smaller for CNC. This value is added to centre distance for driven-gear layout."
+    tipAdj = "Centre distance used for driven gear placement = nominal + clearance + backlash (mm). Updates when you change method, teeth, or the values above."
+
+    SetControlTipOnObject GetMfgMethodCombo(), tipMethod
+    SetControlTipOnObject GetMfgClearanceTextBox(), tipClr
+    SetControlTipOnObject GetMfgBacklashTextBox(), tipBl
+    SetControlTipOnObject GetMfgAdjustedCenterTextBox(), tipAdj
+
+    SetControlTip "cboMfgMethods", tipMethod, "fraManufacturing"
+    SetControlTip "cboMfgMethod", tipMethod, "fraManufacturing"
+    SetControlTip "tbCenterClearance", tipClr, "fraManufacturing"
+    SetControlTip "TextBox1", tipClr, "fraManufacturing"
+    SetControlTip "tbBacklash", tipBl, "fraManufacturing"
+    SetControlTip "TextBox2", tipBl, "fraManufacturing"
+    SetControlTip "tbTrainCenterAdjusted", tipAdj, "fraManufacturing"
+    SetControlTip "TextBox3", tipAdj, "fraManufacturing"
+End Sub
+
+' Called from GearTrain when generating a driven gear
+Public Function MfgClearanceMM() As Double
+    On Error Resume Next
+    MfgClearanceMM = 0#
+    If GetMfgTextBoxValue(GetMfgClearanceTextBox()) <> "" Then MfgClearanceMM = CDbl(GetMfgTextBoxValue(GetMfgClearanceTextBox()))
+    On Error GoTo 0
+End Function
+
+Public Function MfgBacklashMM() As Double
+    On Error Resume Next
+    MfgBacklashMM = 0#
+    If GetMfgTextBoxValue(GetMfgBacklashTextBox()) <> "" Then MfgBacklashMM = CDbl(GetMfgTextBoxValue(GetMfgBacklashTextBox()))
+    On Error GoTo 0
+End Function
+
+Private Sub cboMfgMethod_Change()
+    ApplyMfgMethodDefaults
+End Sub
+
+Private Sub cboMfgMethods_Change()
+    ApplyMfgMethodDefaults
+End Sub
+
+Private Sub ComboBox1_Change()
+    ApplyMfgMethodDefaults
+End Sub
+
+Private Sub ComboBox2_Change()
+    ApplyMfgMethodDefaults
+End Sub
+
+Private Sub ComboBox3_Change()
+    ApplyMfgMethodDefaults
+End Sub
+
+Private Sub tbCenterClearance_Change()
+    UpdateTrainCenterDistance
+End Sub
+
+Private Sub tbBacklash_Change()
+    UpdateTrainCenterDistance
+End Sub
+
+Private Sub TextBox1_Change()
+    UpdateTrainCenterDistance
+End Sub
+
+Private Sub TextBox2_Change()
+    UpdateTrainCenterDistance
+End Sub
+
+Private Sub TextBox3_Change()
+    UpdateTrainCenterDistance
+End Sub
+
+Private Sub SetFormControlEnabled(ByVal ctrlName As String, ByVal enabled As Boolean)
+    Dim ctrl As Object
+    Set ctrl = FindControlByName(Me, ctrlName)
+    If ctrl Is Nothing Then Exit Sub
+    On Error Resume Next
+    ctrl.Enabled = enabled
+    On Error GoTo 0
+End Sub
+
+Private Sub UpdateHubControlsUI()
+    Dim showHub As Boolean
+    Dim useHub As Boolean
+    On Error Resume Next
+    showHub = GetOptionValue("optDrivingGear") Or GetOptionValue("optDrivenGear")
+    SetFormControlVisible "chkUseHub", showHub
+    SetFormControlVisible "tbHubDia", showHub
+    If ControlExists("lblHubDia") Then SetFormControlVisible "lblHubDia", showHub
+    useHub = showHub And GetFormCheckboxOrDefault("chkUseHub", False)
+    SetFormControlEnabled "tbHubDia", useHub
+    On Error GoTo 0
+End Sub
+
+Private Function GetFormCheckboxOrDefault(ByVal ctrlName As String, ByVal defaultVal As Boolean) As Boolean
+    Dim ctrl As Object
+    GetFormCheckboxOrDefault = defaultVal
+    Set ctrl = FindControlByName(Me, ctrlName)
+    If ctrl Is Nothing Then Exit Function
+    On Error Resume Next
+    GetFormCheckboxOrDefault = CBool(ctrl.Value)
+    On Error GoTo 0
+End Function
+
+Private Function IsStackedGearRoleSelected() As Boolean
+    IsStackedGearRoleSelected = GetOptionValue("optStackedGear")
+End Function
+
+' Creates optStackedGear at runtime if missing from the form designer (GroupName must match Driving/Driven).
+Private Sub EnsureStackedGearOptionControl()
+    Dim opt As Object
+    Dim refOpt As Object
+    Dim parent As Object
+
+    On Error Resume Next
+    If ControlExists("optStackedGear") Then
+        SetFormControlVisible "optStackedGear", True
+        Exit Sub
+    End If
+
+    Set refOpt = FindControlByName(Me, "optDrivenGear")
+    If refOpt Is Nothing Then Set refOpt = FindControlByName(Me, "optDrivingGear")
+    If refOpt Is Nothing Then Exit Sub
+
+    Set parent = refOpt.Parent
+    If parent Is Nothing Then Set parent = Me
+
+    Set opt = parent.Controls.Add("Forms.OptionButton.1", "optStackedGear", True)
+    If opt Is Nothing Then Exit Sub
+    opt.Caption = "Stacked"
+    opt.GroupName = "GearRole"
+    opt.Left = refOpt.Left
+    opt.Top = refOpt.Top + refOpt.Height + 6
+    opt.Width = refOpt.Width
+    opt.Height = refOpt.Height
+    opt.Visible = True
+    On Error GoTo 0
+End Sub
+
+Private Sub SyncGearRoleFromOptions()
+    On Error Resume Next
+    If IsStackedGearRoleSelected() Then
+        GearTrainRole = GEAR_ROLE_STACKED
+    ElseIf GetOptionValue("optDrivenGear") Then
+        GearTrainRole = GEAR_ROLE_DRIVEN
+    Else
+        GearTrainRole = GEAR_ROLE_DRIVING
+    End If
+    UpdateGearRoleUI
+    On Error GoTo 0
+End Sub
+
+Private Sub UpdateGearRoleUI()
+    Dim showDrivenLayout As Boolean
+    Dim showBaseGearPicker As Boolean
+    On Error Resume Next
+
+    showDrivenLayout = GetOptionValue("optDrivenGear")
+    showBaseGearPicker = showDrivenLayout Or IsStackedGearRoleSelected() Or (GearTrainRole = GEAR_ROLE_STACKED)
+
+    ' Frame must stay visible for Stacked when picker controls live inside fraDrivenGear (child Visible is ignored if parent is hidden)
+    SetFormControlVisible "fraDrivenGear", showBaseGearPicker
+    SetFormControlVisible "lblDrivingGear", showBaseGearPicker
+    SetFormControlVisible "cboDrivingGearBody", showBaseGearPicker
+    SetFormControlVisible "tbDrivingGearBody", showBaseGearPicker
+    SetFormControlVisible "btnPickDrivingBody", showBaseGearPicker
+    SetFormControlVisible "btnRefreshDrivingGear", showBaseGearPicker
+    SetFormControlVisible "lblMeshAngle", showDrivenLayout
+    SetFormControlVisible "tbMeshAngle", showDrivenLayout
+    SetFormControlVisible "lblTrainCenter", showDrivenLayout
+    SetFormControlVisible "tbTrainCenter", showDrivenLayout
+    SetFormControlVisible "fraManufacturing", showDrivenLayout
+    SetFormControlVisible "tbTrainCenterAdjusted", showDrivenLayout
+    SetFormControlVisible "tbCenterClearance", showDrivenLayout
+    SetFormControlVisible "tbBacklash", showDrivenLayout
+    SetFormControlVisible "TextBox1", showDrivenLayout
+    SetFormControlVisible "TextBox2", showDrivenLayout
+    SetFormControlVisible "TextBox3", showDrivenLayout
+    SetFormControlVisible "cboMfgMethods", showDrivenLayout
+    SetFormControlVisible "cboMfgMethod", showDrivenLayout
+
+    If showBaseGearPicker Then
+        tbModule.Enabled = False
+        tbPressureAngle.Enabled = False
+        tbModule.BackColor = RGB(240, 240, 240)
+        tbPressureAngle.BackColor = RGB(240, 240, 240)
+        RefreshDrivingGearBodyCombo
+        UpdateDrivingGearDisplay
+        If showDrivenLayout Then
+            ApplyMfgMethodDefaults
+            UpdateTrainCenterDistance
+        End If
+    Else
+        tbModule.Enabled = True
+        tbPressureAngle.Enabled = True
+        tbModule.BackColor = vbWhite
+        tbPressureAngle.BackColor = vbWhite
+    End If
+    UpdateHubControlsUI
+    On Error GoTo 0
+End Sub
+
+Private Sub chkUseHub_Click()
+    UpdateHubControlsUI
+End Sub
+
+Private Function GetDrivingGearBodyCombo() As Object
+    Set GetDrivingGearBodyCombo = FindControlByName(Me, "cboDrivingGearBody")
+End Function
+
+Private Sub RefreshDrivingGearBodyCombo()
+    Dim cb As Object
+    Dim i As Long
+    Dim n As Long
+    Dim prevTitle As String
+    On Error Resume Next
+    Set cb = GetDrivingGearBodyCombo()
+    If cb Is Nothing Then Exit Sub
+    prevTitle = GearTrainDrivingPartTitle
+    n = RefreshDrivingGearBodyComboList()
+    cb.Clear
+    cb.Style = 2
+    If n < 1 Then
+        cb.AddItem "(no solid bodies — open the driving gear part)"
+        cb.ListIndex = 0
+        GearTrainDrivingPartTitle = ""
+        Exit Sub
+    End If
+    For i = 0 To n - 1
+        cb.AddItem DrivingGearComboItemCaption(i)
+    Next i
+    cb.ListIndex = -1
+    For i = 0 To n - 1
+        If GearTrainDrivingComboPartTitle(i) = prevTitle And prevTitle <> "" Then
+            cb.ListIndex = i
+            Exit For
+        End If
+    Next i
+    If cb.ListIndex < 0 And n = 1 Then
+        cb.ListIndex = 0
+        ApplyDrivingGearFromComboSelection
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Sub ApplyDrivingGearFromComboSelection()
+    Dim cb As Object
+    On Error Resume Next
+    Set cb = GetDrivingGearBodyCombo()
+    If cb Is Nothing Then Exit Sub
+    If cb.ListIndex < 0 Then
+        GearTrainDrivingPartTitle = ""
+        GearTrainDrivingAxisName = ""
+        UpdateDrivingGearDisplay
+        Exit Sub
+    End If
+    If ApplyDrivingGearFromComboIndex(cb.ListIndex) Then
+        UpdateDrivingGearDisplay
+        UpdateTrainCenterDistance
+        UpdateGearCalculations
+    Else
+        GearTrainDrivingPartTitle = ""
+        GearTrainDrivingAxisName = ""
+        UpdateDrivingGearDisplay
+        SetFormTextBox "tbDrivingGearBody", "(choose a macro-built driving gear from the list)"
+        UpdateTrainCenterDistance
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Sub UpdateDrivingGearDisplay()
+    On Error Resume Next
+    If ControlExists("tbDrivingGearBody") Then
+        If GearTrainDrivingPartTitle <> "" Then
+            tbDrivingGearBody.Text = GearTrainDrivingPartTitle & "  (z=" & GearTrainDrivingTeeth & _
+                ", m=" & Format(GearTrainDrivingModuleMM, "0.###") & ", " & GearTrainDrivingBodyLabel & ")"
+        Else
+            tbDrivingGearBody.Text = "(select driving gear from the list above)"
+        End If
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Sub UpdateTrainCenterDistance()
+    Dim c As Double
+    Dim z2 As Long
+    Dim teethText As String
+    On Error Resume Next
+    If Not ControlExists("tbTrainCenter") Then Exit Sub
+
+    If GearTrainDrivingTeeth <= 0 Or GearTrainDrivingModuleMM <= 0 Then
+        SetFormTextBox "tbTrainCenter", "(select a macro-built driving gear)"
+        SetFormTextBox "tbTrainCenterAdjusted", ""
+        Exit Sub
+    End If
+
+    teethText = GetFormTextBox("tbTeeth")
+    If teethText = "" Then teethText = Trim$(tbTeeth.Text)
+    If teethText = "" Then
+        SetFormTextBox "tbTrainCenter", "(enter number of teeth for driven gear)"
+        SetFormTextBox "tbTrainCenterAdjusted", ""
+        Exit Sub
+    End If
+
+    z2 = CLng(teethText)
+    SyncGearTypeFromForm
+    c = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, z2, GearTrainDrivingIsInternal, GearGeom.IsInternal)
+    SetFormTextBox "tbTrainCenter", Format(c, "0.###") & " mm"
+    GearTrainCenterDistanceMM = c
+    UpdateAdjustedCenterDistance c
+    On Error GoTo 0
+End Sub
+
+Private Sub UpdateAdjustedCenterDistance(ByVal cNominal As Double)
+    Dim deltaC As Double
+    Dim backlash As Double
+    Dim clrText As String
+    Dim blText As String
+    On Error Resume Next
+    deltaC = 0#
+    backlash = 0#
+    clrText = GetMfgTextBoxValue(GetMfgClearanceTextBox())
+    If clrText <> "" Then deltaC = CDbl(clrText)
+    blText = GetMfgTextBoxValue(GetMfgBacklashTextBox())
+    If blText <> "" Then backlash = CDbl(blText)
+
+    GearTrainLayoutCenterDistanceMM = cNominal + deltaC + backlash
+
+    SetMfgTextBox GetMfgAdjustedCenterTextBox(), Format(GearTrainLayoutCenterDistanceMM, "0.###") & " mm"
+    On Error GoTo 0
+End Sub
+
+Private Sub optExternalGear_Click()
+    SyncGearTypeFromForm
+    ValidateInputs
+    UpdateGearCalculations
+End Sub
+
+Private Sub optInternalGear_Click()
+    SyncGearTypeFromForm
+    ValidateInputs
+    UpdateGearCalculations
+End Sub
+
+Private Sub optDrivingGear_Click()
+    SyncGearRoleFromOptions
+    UpdateGearCalculations
+End Sub
+
+Private Sub optDrivenGear_Click()
+    SyncGearRoleFromOptions
+    UpdateGearCalculations
+End Sub
+
+Private Sub optStackedGear_Click()
+    SyncGearRoleFromOptions
+    UpdateGearCalculations
+End Sub
+
+Private Sub UserForm_MouseUp(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    ' Runtime-created optStackedGear has no Click handler — sync role after any mouse-up on the form.
+    If ControlExists("optStackedGear") Then
+        If IsStackedGearRoleSelected() And GearTrainRole <> GEAR_ROLE_STACKED Then
+            SyncGearRoleFromOptions
+        ElseIf Not IsStackedGearRoleSelected() And GearTrainRole = GEAR_ROLE_STACKED Then
+            SyncGearRoleFromOptions
+        End If
+    End If
+End Sub
+
+Private Sub cboDrivingGearBody_Change()
+    ApplyDrivingGearFromComboSelection
+End Sub
+
+Private Sub btnPickDrivingBody_Click()
+    RefreshDrivingGearBodyCombo
+End Sub
+
+Private Sub btnRefreshDrivingGear_Click()
+    RefreshDrivingGearBodyCombo
+End Sub
+
+Private Sub UserForm_QueryClose(Cancel As Integer, CloseMode As Integer)
+    gbGearFormOpen = False
+    Cancel = False
+End Sub
+
+Private Sub UserForm_Terminate()
+    gbGearFormOpen = False
+End Sub
+
+Private Sub btnClose_Click()
+    CloseGearForm
+End Sub
+
+Private Sub btnCancel_Click()
+    CloseGearForm
+End Sub
+
+Private Sub cbCancel_Click()
+    CloseGearForm
+End Sub
+
+Private Sub CommandButton1_Click()
+    ' Some forms name the cancel control CommandButton1
+    CloseGearForm
+End Sub
+
+Private Sub tbMeshAngle_Change()
+    On Error Resume Next
+    If Trim(tbMeshAngle.Text) <> "" Then GearTrainMeshAngleDeg = CDbl(tbMeshAngle.Text)
+    UpdateTrainCenterDistance
+    On Error GoTo 0
+End Sub
+
+Private Sub cbGenerate_Click()
+    Dim PressureAngle As Double
+    Dim Module As Double
+    Dim NumTeeth As Integer
+    Dim Width As Double
+    Dim ErrorMsg As String
+
+    If IsStackedGearRoleSelected() Then
+        GearTrainRole = GEAR_ROLE_STACKED
+        If GearTrainDrivingPartTitle = "" Then
+            ApplyDrivingGearFromComboSelection
+        End If
+        If GearTrainDrivingPartTitle = "" Then
+            MsgBox "Choose the base gear from the list (open that part first, then Refresh list).", vbExclamation
+            Exit Sub
+        End If
+        If Not ValidateStackedBaseGearHasNoHub() Then
+            MsgBox gLastGearBuildError, vbExclamation, "Stacked Gear"
+            Exit Sub
+        End If
+    ElseIf GetOptionValue("optDrivenGear") Then
+        GearTrainRole = GEAR_ROLE_DRIVEN
+        If GearTrainDrivingPartTitle = "" Then
+            ApplyDrivingGearFromComboSelection
+        End If
+        If GearTrainDrivingPartTitle = "" Then
+            MsgBox "Choose the driving gear from the list (open that part first, then Refresh list).", vbExclamation
+            Exit Sub
+        End If
+        On Error Resume Next
+        GearTrainMeshAngleDeg = CDbl(tbMeshAngle.Text)
+        On Error GoTo 0
+        UpdateTrainCenterDistance
+    Else
+        GearTrainRole = GEAR_ROLE_DRIVING
+        GearTrainLayoutCenterDistanceMM = 0#
+    End If
+    UpdateHubControlsUI
+
+    ' --- validation (same as before) ---
+    ErrorMsg = ""
+    If Trim(tbPressureAngle.Text) = "" Then
+        ErrorMsg = ErrorMsg & "Pressure Angle is required." & vbCrLf
+    Else
+        On Error Resume Next
+        PressureAngle = CDbl(tbPressureAngle.Text)
+        If Err.Number <> 0 Or PressureAngle <= 0 Then ErrorMsg = ErrorMsg & "Pressure Angle must be a positive number." & vbCrLf
+        On Error GoTo 0
+    End If
+
+    If Trim(tbModule.Text) = "" Then
+        ErrorMsg = ErrorMsg & "Module is required." & vbCrLf
+    Else
+        On Error Resume Next
+        Module = CDbl(tbModule.Text)
+        If Err.Number <> 0 Or Module <= 0 Then ErrorMsg = ErrorMsg & "Module must be a positive number." & vbCrLf
+        On Error GoTo 0
+    End If
+
+    If Trim(tbTeeth.Text) = "" Then
+        ErrorMsg = ErrorMsg & "Number of Teeth is required." & vbCrLf
+    Else
+        On Error Resume Next
+        NumTeeth = CInt(tbTeeth.Text)
+        If Err.Number <> 0 Or NumTeeth <= 0 Then
+            ErrorMsg = ErrorMsg & "Number of Teeth must be a positive integer." & vbCrLf
+        End If
+        On Error GoTo 0
+    End If
+
+    If Trim(tbWidth.Text) = "" Then
+        ErrorMsg = ErrorMsg & "Width is required." & vbCrLf
+    Else
+        On Error Resume Next
+        Width = CDbl(tbWidth.Text)
+        If Err.Number <> 0 Or Width <= 0 Then ErrorMsg = ErrorMsg & "Width must be a positive number." & vbCrLf
+        On Error GoTo 0
+    End If
+
+    SyncGearTypeFromForm
+
+    If GetOptionValue("optDrivenGear") And GearTrainDrivingTeeth > 0 Then
+        If GearTrainDrivingIsInternal Xor GearGeom.IsInternal Then
+            If GearTrainDrivingIsInternal Then
+                If GearTrainDrivingTeeth <= NumTeeth Then
+                    ErrorMsg = ErrorMsg & "Internal driving gear needs more teeth than the driven pinion." & vbCrLf
+                End If
+            ElseIf GearGeom.IsInternal Then
+                If NumTeeth <= GearTrainDrivingTeeth Then
+                    ErrorMsg = ErrorMsg & "Internal driven gear needs more teeth than the driving pinion." & vbCrLf
+                End If
+            End If
+        End If
+    End If
+
+    If ErrorMsg <> "" Then
+        MsgBox "Please correct the following errors:" & vbCrLf & vbCrLf & ErrorMsg, vbExclamation, "Validation Error"
+        Exit Sub
+    End If
+
+    LogFormGenerateClick GearTrainRole, PressureAngle, Module, NumTeeth, Width, GearTrainMeshAngleDeg
+
+    Me.Hide
+    Call GenerateGear(PressureAngle, Module, NumTeeth, Width)
+    ' Modeless: show form again after generate (do not Unload)
+    Me.Show vbModeless
+End Sub
+
+Private Sub Label1_Click()
+End Sub
+
+Private Sub Frame1_Click()
+End Sub
+
+Private Sub Frame2_Click()
+End Sub
+
+Private Sub Frame3_Click()
+End Sub
+
+Private Sub Frame4_Click()
+End Sub
+
+Private Sub ValidateInputs()
+    On Error Resume Next
+    Dim PressureAngle As Double
+    Dim Module As Double
+    Dim NumTeeth As Integer
+    Dim Width As Double
+    Dim MinTeeth As Double
+    Dim Pi As Double
+    Dim PressureAngleRad As Double
+    Dim WarningMsg As String
+    Dim PitchDiameter As Double
+
+    Pi = 3.14159265358979
+    If Not tbPressureAngle Is Nothing Then tbPressureAngle.BackColor = vbWhite
+    If Not tbModule Is Nothing Then tbModule.BackColor = vbWhite
+    If Not tbTeeth Is Nothing Then tbTeeth.BackColor = vbWhite
+    If Not tbWidth Is Nothing Then tbWidth.BackColor = vbWhite
+
+    SyncGearTypeFromForm
+
+    If Not tbTeeth Is Nothing And Not tbPressureAngle Is Nothing And Trim(tbTeeth.Text) <> "" And Trim(tbPressureAngle.Text) <> "" Then
+        NumTeeth = CInt(tbTeeth.Text)
+        PressureAngle = CDbl(tbPressureAngle.Text)
+        If NumTeeth > 0 And PressureAngle > 0 Then
+            PressureAngleRad = PressureAngle * Pi / 180
+            MinTeeth = 2 / (Sin(PressureAngleRad) ^ 2)
+            If GearGeom.IsInternal Then
+                If NumTeeth < MinTeeth + 1 Then tbTeeth.BackColor = RGB(255, 200, 200)
+            Else
+                If NumTeeth < MinTeeth Then tbTeeth.BackColor = RGB(255, 200, 200)
+            End If
+        End If
+    End If
+
+    UpdateGearCalculations
+    UpdateTrainCenterDistance
+End Sub
+
+Private Sub UpdateGearCalculations()
+    Dim Module As Double
+    Dim NumTeeth As Integer
+    Dim PressureAngle As Double
+    Dim PitchDiameter As Double
+    Dim BaseDiameter As Double
+    Dim AddendumDiameter As Double
+    Dim DedendumDiameter As Double
+    Dim Pi As Double
+    Dim CenterDistance As Double
+    Dim Gear2Teeth As Integer
+    Dim InfoText As String
+
+    Pi = 3.14159265358979
+    InfoText = ""
+
+    If Not tbModule Is Nothing And Not tbTeeth Is Nothing And Trim(tbModule.Text) <> "" And Trim(tbTeeth.Text) <> "" Then
+        On Error Resume Next
+        Module = CDbl(tbModule.Text)
+        NumTeeth = CInt(tbTeeth.Text)
+        On Error GoTo 0
+        If Module > 0 And NumTeeth > 0 Then
+            SyncGearTypeFromForm
+            GearGeom.ModuleMM = Module
+            GearGeom.NumTeeth = NumTeeth
+            If Trim(tbPressureAngle.Text) <> "" Then GearGeom.PressureAngleDeg = CDbl(tbPressureAngle.Text)
+            CalculateGearGeometry
+
+            PitchDiameter = GearGeom.PitchDiameterMM
+            AddendumDiameter = GearGeom.AddendumDiameterMM
+            DedendumDiameter = GearGeom.DedendumDiameterMM
+            BaseDiameter = GearGeom.BaseDiameterMM
+
+            InfoText = IIf(GearGeom.IsInternal, "Internal ring gear. ", "") & "Pitch Diameter: " & Format(PitchDiameter, "0.000") & " mm"
+            UpdateLabel "lblPitchDiameter", Format(PitchDiameter, "0.000") & " mm"
+            UpdateLabel "lblAddendumDiameter", Format(AddendumDiameter, "0.000") & " mm (tip)"
+            UpdateLabel "lblDedendumDiameter", Format(DedendumDiameter, "0.000") & " mm (root)"
+            UpdateLabel "lblBaseDiameter", Format(BaseDiameter, "0.000") & " mm"
+            If ControlExists("optDrivenGear") And GetOptionValue("optDrivenGear") And GearTrainDrivingTeeth > 0 Then
+                CenterDistance = CenterDistanceMM(GearTrainDrivingModuleMM, GearTrainDrivingTeeth, NumTeeth, _
+                    GearTrainDrivingIsInternal, GearGeom.IsInternal)
+                UpdateLabel "lblCenterDistance", Format(CenterDistance, "0.000") & " mm"
+                UpdateTextBox "tbTrainCenter", Format(CenterDistance, "0.000") & " mm"
+                UpdateAdjustedCenterDistance CenterDistance
+            End If
+            UpdateLabel "lblGearInfo", InfoText
+        End If
+    End If
+End Sub
+
+Private Sub UpdateLabel(ControlName As String, Value As String)
+    Dim ctrl As Object
+    Set ctrl = FindControlByName(Me, ControlName)
+    If ctrl Is Nothing Then Exit Sub
+    On Error Resume Next
+    ctrl.Caption = Value
+    On Error GoTo 0
+End Sub
+
+Private Sub UpdateTextBox(ControlName As String, Value As String)
+    SetFormTextBox ControlName, Value
+End Sub
+
+Private Sub cbGearTrain_Click()
+    If Not ControlExists("cbGearTrain") Then Exit Sub
+    If cbGearTrain.Value Then
+        tbModule.Enabled = False
+        tbPressureAngle.Enabled = False
+    Else
+        If Not GetOptionValue("optDrivenGear") Then
+            tbModule.Enabled = True
+            tbPressureAngle.Enabled = True
+        End If
+    End If
+    ValidateInputs
+End Sub
+
+Private Sub tbModule_Change()
+    ValidateInputs
+End Sub
+
+Private Sub tbPressureAngle_Change()
+    ValidateInputs
+End Sub
+
+Private Sub tbTeeth_Change()
+    ValidateInputs
+    UpdateTrainCenterDistance
+End Sub
+
+Private Sub tbWidth_Change()
+    ValidateInputs
+End Sub
+
+Private Sub tbGear2Teeth_Change()
+    UpdateGearCalculations
+End Sub

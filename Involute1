@@ -1,0 +1,391 @@
+Option Explicit
+
+' SolidWorks application and document references
+Public swApp As SldWorks.SldWorks
+Public swDoc As SldWorks.ModelDoc2
+Public swPart As SldWorks.PartDoc
+Public swModelDocExt As SldWorks.ModelDocExtension
+Public swFeatMgr As SldWorks.FeatureManager
+Public swSelMgr As SldWorks.SelectionMgr
+Public swSketchManager As SldWorks.SketchManager
+Public sw2DSketch As SldWorks.Sketch
+Public swSelData As SldWorks.SelectData
+
+' Calculated gear geometry (inputs in mm; radii/diameters also stored in meters for API)
+Public Type GearGeometry
+    PressureAngleDeg As Double
+    ModuleMM As Double
+    NumTeeth As Long
+    WidthMM As Double
+    PitchDiameterMM As Double
+    PitchRadiusMM As Double
+    BaseDiameterMM As Double
+    BaseRadiusMM As Double
+    AddendumDiameterMM As Double
+    AddendumRadiusMM As Double
+    DedendumDiameterMM As Double
+    DedendumRadiusMM As Double
+    CircularPitchMM As Double
+    AngularPitchDeg As Double
+    PitchRadiusM As Double
+    BaseRadiusM As Double
+    AddendumRadiusM As Double
+    DedendumRadiusM As Double
+    WidthM As Double
+    HubDiameterMM As Double
+    HubRadiusMM As Double
+    UseHub As Boolean
+    ShaftDiameterMM As Double
+    ShaftRadiusMM As Double
+    RimWidthMM As Double
+    HubWidthMM As Double
+    RimWidthM As Double
+    HubWidthM As Double
+    HubRadiusM As Double
+    ShaftRadiusM As Double
+    GapArcLengthMM As Double
+    GapHalfArcLengthMM As Double
+    GapRootFilletMM As Double
+    IsInternal As Boolean
+End Type
+
+Public GearGeom As GearGeometry
+Public Const MM_PER_M As Double = 1000#
+
+' Stored feature / sketch references (no hardcoded Sketch1 / Spline1 names)
+Public swFrontPlaneFeat As SldWorks.Feature
+Public swGearAxisFeat As SldWorks.Feature
+Public swLayoutSketchFeat As SldWorks.Feature
+Public swLayoutCenterPt As SldWorks.SketchPoint
+Public swRevolveAxisSketchFeat As SldWorks.Feature
+Public swRevolveProfileSketchFeat As SldWorks.Feature
+Public swRevolveFeat As SldWorks.Feature
+Public swAddendumExtrudeFeat As SldWorks.Feature
+Public swToothGapSketchFeat As SldWorks.Feature
+Public swToothCutFeat As SldWorks.Feature
+Public swPatternFeat As SldWorks.Feature
+Public swCombineFeat As SldWorks.Feature
+
+Public Pi As Double
+Public boolstatus As Boolean
+Public DebugLog As String
+
+' Gear train / mesh layout (driven gear picks up params from driving gear body)
+Public Const GEAR_ROLE_DRIVING As Long = 0
+Public Const GEAR_ROLE_DRIVEN As Long = 1
+Public Const GEAR_ROLE_STACKED As Long = 2
+
+Public GearTrainRole As Long
+Public GearTrainMeshAngleDeg As Double
+Public GearTrainDrivingPartTitle As String
+Public GearTrainDrivingBodyLabel As String
+' Ref axis feature name for the selected driving body (e.g. "9T 11.25 Axis")
+Public GearTrainDrivingAxisName As String
+Public GearTrainDrivingModuleMM As Double
+Public GearTrainDrivingTeeth As Long
+Public GearTrainDrivingPressureDeg As Double
+Public GearTrainDrivingWidthMM As Double
+Public GearTrainDrivingIsInternal As Boolean
+Public GearTrainCenterDistanceMM As Double
+Public GearTrainLayoutCenterDistanceMM As Double
+
+' Driving-gear dropdown list (filled by RefreshDrivingGearBodyComboList in GearLib)
+Public GearTrainDrivingComboCount As Long
+Public GearTrainDrivingComboPartTitle() As String
+Public GearTrainDrivingComboBodyName() As String
+
+' True while the gear form is open; main() loops with DoEvents so SW stays interactive (modeless pick)
+Public gbGearFormOpen As Boolean
+
+Public Sub DebugPrint(ByVal msg As String)
+    Debug.Print msg
+    DebugLog = DebugLog & msg & vbCrLf
+End Sub
+
+Public Sub CloseGearForm()
+    gbGearFormOpen = False
+    On Error Resume Next
+    Unload UserForm1
+    On Error GoTo 0
+End Sub
+
+Sub main()
+    On Error GoTo ErrorHandler
+    GearTrainRole = GEAR_ROLE_DRIVING
+    GearTrainMeshAngleDeg = 0#
+    GearTrainDrivingPartTitle = ""
+    GearTrainDrivingBodyLabel = ""
+    GearTrainDrivingAxisName = ""
+    GearTrainDrivingIsInternal = False
+    GearTrainLayoutCenterDistanceMM = 0#
+    GearGeom.IsInternal = False
+    GearGeom.UseHub = False
+    Load UserForm1
+    gbGearFormOpen = True
+    UserForm1.Show vbModeless
+    ' Keep macro alive until form closes; otherwise the form blocks graphics or unloads
+    Do While gbGearFormOpen
+        DoEvents
+    Loop
+    Exit Sub
+ErrorHandler:
+    MsgBox "Error loading UserForm1:" & vbCrLf & Err.Number & " - " & Err.Description, vbCritical, "Form Error"
+End Sub
+
+' GenerateGear: layout -> body -> tooth -> pattern -> validate -> equations
+Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer, Width As Double)
+    On Error GoTo GenFail
+
+    DebugLog = ""
+    ClearLastGearBuildError
+    gLastGearBuildStep = ""
+
+    Set swApp = Application.SldWorks
+    GearBuildStep "SolidWorks application"
+    If swApp Is Nothing Then
+        GearBuildStepFail "Application.SldWorks is Nothing"
+        MsgBox "SolidWorks is not running.", vbCritical
+        Exit Sub
+    End If
+    GearBuildStepOk
+
+    GearGeom.PressureAngleDeg = PressureAngle
+    GearGeom.ModuleMM = Module
+    GearGeom.NumTeeth = NumTeeth
+    GearGeom.WidthMM = Width
+
+    GearBuildStep "ValidateGearInputs"
+    If Not ValidateGearInputsPublic(GearGeom.PressureAngleDeg, GearGeom.ModuleMM, GearGeom.NumTeeth, GearGeom.WidthMM) Then
+        GearBuildStepFail "input validation rejected"
+        Exit Sub
+    End If
+    GearBuildStepOk
+
+    If GearTrainRole = GEAR_ROLE_DRIVEN Or GearTrainRole = GEAR_ROLE_STACKED Then
+        GearBuildStep "Gear train — open existing part"
+        If GearTrainDrivingPartTitle = "" Then
+            GearBuildStepFail "no driving/base gear selected from list"
+            MsgBox "Select a gear from the list (Refresh list after opening the part).", vbExclamation
+            Exit Sub
+        End If
+        If GearTrainRole = GEAR_ROLE_DRIVEN Then
+            GearBuildStep "ApplyDrivenGearInputsFromDrivingGear"
+            If Not ApplyDrivenGearInputsFromDrivingGear() Then
+                GearBuildStepFail
+                MsgBox "Driven gear mode requires a valid driving gear.", vbExclamation
+                Exit Sub
+            End If
+            GearBuildStepOk
+        Else
+            GearBuildStep "ValidateStackedBaseGearHasNoHub"
+            If Not ValidateStackedBaseGearHasNoHub() Then
+                GearBuildStepFail
+                MsgBox gLastGearBuildError, vbExclamation, "Stacked Gear"
+                Exit Sub
+            End If
+            GearBuildStepOk
+            GearBuildStep "ApplyStackedGearInputsFromBaseGear"
+            If Not ApplyStackedGearInputsFromBaseGear() Then
+                GearBuildStepFail
+                MsgBox "Stacked gear mode requires a valid base gear.", vbExclamation
+                Exit Sub
+            End If
+            GearBuildStepOk
+        End If
+        GearBuildStep "CalculateGearGeometry (driven/stacked)"
+        CalculateGearGeometry
+        LogNewGearInputs "after CalculateGearGeometry (driven/stacked)"
+        GearBuildStepOk
+        GearBuildStep "FindOpenPartDocumentByTitle"
+        Set swDoc = FindOpenPartDocumentByTitle(GearTrainDrivingPartTitle)
+        If swDoc Is Nothing Then
+            GearBuildStepFail GearTrainDrivingPartTitle
+            MsgBox "Could not open the gear part: " & GearTrainDrivingPartTitle, vbCritical
+            Exit Sub
+        End If
+        GearBuildStepOk swDoc.GetTitle
+        GearBuildStep "SyncDrivingGearAxisReference"
+        SyncDrivingGearAxisReference swDoc
+        GearBuildStepOk GearTrainDrivingAxisName
+    Else
+        GearBuildStep "CalculateGearGeometry (driving)"
+        CalculateGearGeometry
+        LogNewGearInputs "after CalculateGearGeometry (driving)"
+        GearBuildStepOk
+        GearBuildStep "NewPart"
+        Set swDoc = swApp.NewPart
+        If swDoc Is Nothing Then
+            GearBuildStepFail "swApp.NewPart returned Nothing"
+            MsgBox "Could not create a new part document.", vbCritical
+            Exit Sub
+        End If
+        GearBuildStepOk swDoc.GetTitle
+    End If
+
+    Dim activateErr As Long
+    Dim docTitle As String
+    docTitle = swDoc.GetTitle
+    GearBuildStep "ActivateDoc"
+    On Error Resume Next
+    swApp.ActivateDoc3 docTitle, True, 0, activateErr
+    If activateErr <> 0 Then swApp.ActivateDoc2 docTitle, False, 0
+    swDoc.Visible = True
+    On Error GoTo GenFail
+    GearBuildStepOk docTitle
+
+    GearBuildStep "Init SW API references"
+    Set swPart = swDoc
+    Set swModelDocExt = swDoc.Extension
+    Set swSketchManager = swPart.SketchManager
+    Set swFeatMgr = swDoc.FeatureManager
+    Set swSelMgr = swDoc.SelectionManager
+    Pi = 3.14159265358979
+    swModelDocExt.SetUserPreferenceInteger swUserPreferenceIntegerValue_e.swUnitsLinear, _
+        swUserPreferenceOption_e.swDetailingNoOptionSpecified, swMM
+    swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swInputDimValOnCreate, False
+    GearBuildStepOk
+
+    LogGearBuildBanner "GenerateGear START"
+    If GearTrainRole = GEAR_ROLE_DRIVEN Or GearTrainRole = GEAR_ROLE_STACKED Then
+        LogGearTrainDrivingSelection "GenerateGear start"
+    End If
+    LogNewGearInputs "GenerateGear start"
+
+    GearBuildStep "SyncGearTrainLayoutCenterFromForm"
+    SyncGearTrainLayoutCenterFromForm
+    GearBuildStepOk
+
+    GearBuildStep "ResetGearBuildFeatureRefs"
+    ResetGearBuildFeatureRefs
+    GearBuildStepOk
+
+    GearBuildStep "ResetGearSketchOffset"
+    ResetGearSketchOffset
+    GearBuildStepOk
+
+    GearBuildStep "SetGearTrainSketchOffsetFromLayout"
+    SetGearTrainSketchOffsetFromLayout
+    LogGearLayoutState "after SetGearTrainSketchOffsetFromLayout"
+    GearBuildStepOk FormatGearTrainOffsetSummary()
+
+    GearBuildStep "CaptureSolidBodyCountBeforeGearBuild"
+    CaptureSolidBodyCountBeforeGearBuild
+    GearBuildStepOk "bodies before=" & GetGearSolidBodyCountBefore()
+
+    GearBuildStep "AssignCurrentGearIndex"
+    AssignCurrentGearIndex
+    GearBuildStepOk "index=" & GetCurrentGearIndex()
+
+    GearBuildStep "CreateGearGlobalVariableEquations"
+    CreateGearGlobalVariableEquations
+    LogGearZStackChain "after CreateGearGlobalVariableEquations"
+    GearBuildStepOk
+
+    GearBuildStep "SyncBossStartOffsetFromZEquations"
+    SyncBossStartOffsetFromZEquations
+    GearBuildStepOk FormatGearTrainOffsetSummary()
+
+    GearBuildStep "CreateOrResetPart"
+    If Not CreateOrResetPart() Then
+        GearBuildStepFail
+        GoTo GenFail
+    End If
+    GearBuildStepOk "axis=" & GetGearAxisName()
+
+    GearBuildStep "CreateMasterLayoutSketch"
+    If Not CreateMasterLayoutSketch() Then
+        GearBuildStepFail
+        GoTo GenFail
+    End If
+    GearBuildStepOk GetLayoutSketchFeatName()
+
+    GearBuildStep "CreateGearRefAxisFromLayoutPoint"
+    If Not CreateGearRefAxisFromLayoutSketchPoint() Then
+        GearBuildStepFail
+        GoTo GenFail
+    End If
+    LogGearBuildContext "after CreateGearRefAxisFromLayoutSketchPoint"
+    GearBuildStepOk GetGearAxisName()
+
+    GearBuildStep "CreateRevolveBlank"
+    If Not CreateRevolveBlank() Then
+        GearBuildStepFail
+        GoTo GenFail
+    End If
+    LogGearBuildContext "after CreateRevolveBlank"
+    GearBuildStepOk swRevolveFeat.Name
+
+    GearBuildStep "CreateToothGapSketch"
+    If Not CreateToothGapSketch() Then
+        GearBuildStepFail
+        GoTo GenFail
+    End If
+    GearBuildStepOk GetGapSketchFeatName()
+
+    GearBuildStep "CutExtrudeToothGap"
+    If Not CutExtrudeToothGap() Then
+        GearBuildStepFail
+        GoTo GenFail
+    End If
+    LogGearBuildContext "after CutExtrudeToothGap"
+    GearBuildStepOk swToothCutFeat.Name
+
+    GearBuildStep "CircularPatternTooth"
+    If Not CircularPatternTooth() Then
+        GearBuildStepFail
+        GoTo GenFail
+    End If
+    GearBuildStepOk swPatternFeat.Name & " instances=" & GearGeom.NumTeeth
+
+    GearBuildStep "RebuildAndValidate"
+    If Not RebuildAndValidate() Then
+        GearBuildStepFail
+        GoTo GenFail
+    End If
+    GearBuildStepOk
+
+    GearBuildStep "NameGearSolidBodyAfterBuild"
+    NameGearSolidBodyAfterBuild
+    GearBuildStepOk
+
+    GearBuildStep "NameGearAxisForCurrentBuild"
+    NameGearAxisForCurrentBuild
+    GearBuildStepOk GetGearAxisName()
+    LinkGearMcMasterEquations
+    GearBuildStepOk
+
+    GearBuildStep "StoreGearMetadataOnPart"
+    StoreGearMetadataOnPart
+    GearBuildStepOk
+
+    If GearTrainRole = GEAR_ROLE_DRIVEN Then
+        DebugPrint "Driven gear layout C=" & Format(GetGearTrainLayoutCenterDistanceMM(), "0.###") & _
+            " mm mesh=" & Format(GearTrainMeshAngleDeg, "0.###") & " deg"
+    ElseIf GearTrainRole = GEAR_ROLE_STACKED Then
+        DebugPrint "Stacked gear on " & GearTrainDrivingPartTitle & " / " & GearTrainDrivingBodyLabel
+    End If
+
+    swDoc.ViewZoomtofit2
+    swDoc.ClearSelection2 True
+    LogGearBuildContext "GenerateGear SUCCESS"
+    LogAllRefAxesInPart
+    DebugPrint "=== GenerateGear completed successfully ==="
+    Exit Sub
+
+GenFail:
+    If gLastGearBuildStep = "" Then gLastGearBuildStep = "(unknown)"
+    If gLastGearBuildError = "" And Err.Number <> 0 Then
+        gLastGearBuildError = FormatVBError()
+    End If
+    LogGearBuildContext "GenerateGear FAILED at " & gLastGearBuildStep
+    LogAllRefAxesInPart
+    DebugPrint "=== GenerateGear FAILED at step: " & gLastGearBuildStep & " ==="
+    If gLastGearBuildError <> "" Then
+        DebugPrint "Error: " & gLastGearBuildError
+    Else
+        DebugPrint "Error: (not captured — see function FAIL lines above)"
+    End If
+    MsgBox "Gear generation failed at step: " & gLastGearBuildStep & vbCrLf & _
+        IIf(gLastGearBuildError <> "", "Error: " & gLastGearBuildError & vbCrLf, "") & _
+        "Open Immediate Window (Ctrl+G) for full log.", vbCritical, "Gear Macro"
+End Sub
