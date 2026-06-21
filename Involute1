@@ -134,6 +134,7 @@ End Sub
 
 ' GenerateGear: layout -> body -> tooth -> pattern -> validate -> equations
 Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer, Width As Double)
+    Dim unusedGearBody As SldWorks.Body2
     On Error GoTo GenFail
 
     DebugLog = ""
@@ -314,6 +315,14 @@ Sub GenerateGear(PressureAngle As Double, Module As Double, NumTeeth As Integer,
     End If
     LogGearBuildContext "after CreateRevolveBlank"
     GearBuildStepOk swRevolveFeat.Name
+
+    GearBuildStep "NameCurrentGearSolidBody"
+    Set unusedGearBody = NameAndResolveCurrentGearSolidBody("after revolve")
+    If unusedGearBody Is Nothing Then
+        GearBuildStepFail "could not name revolve body"
+        GoTo GenFail
+    End If
+    GearBuildStepOk BuildGearBodyName()
 
     GearBuildStep "CreateToothGapSketch"
     If Not CreateToothGapSketch() Then

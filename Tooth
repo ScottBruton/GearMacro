@@ -12,6 +12,7 @@ Option Explicit
 
 Private Const SW_END_BLIND As Long = 0
 Private Const SW_END_THROUGH_ALL As Long = 1
+Private Const SW_END_THROUGH_ALL_BOTH As Long = 9   ' swEndConditions_e.swEndCondThroughAllBoth
 Private Const SW_START_SKETCH_PLANE As Long = 0
 Private Const INVOLUTE_SPLINE_POINT_COUNT As Long = 30
 
@@ -27,27 +28,44 @@ Public Function GetGapSketchFeatName() As String
     GetGapSketchFeatName = mGapSketchFeatName
 End Function
 
-' Midpoint angle on the shorter arc between two Atn2 angles (avoids long-arc wrap).
-Private Function AverageAngleShortArc(ByVal angA As Double, ByVal angB As Double) As Double
-    Dim da As Double
-    da = angB - angA
-    If da > Pi Then da = da - 2# * Pi
-    If da < -Pi Then da = da + 2# * Pi
-    AverageAngleShortArc = angA + da * 0.5#
+Private Function ArcMidAngleShort(ByVal angStart As Double, ByVal angEnd As Double) As Double
+    Dim span As Double
+    span = angEnd - angStart
+    Do While span > Pi
+        span = span - 2# * Pi
+    Loop
+    Do While span <= -Pi
+        span = span + 2# * Pi
+    Loop
+    ArcMidAngleShort = angStart + span / 2#
 End Function
+
+' Mirror point (xRel,yRel) about radial line at gapCenter through origin.
+Private Sub MirrorPointAboutGapCenter(ByVal gapCenter As Double, ByVal xRel As Double, ByVal yRel As Double, _
+    ByRef xMir As Double, ByRef yMir As Double)
+
+    Dim r As Double
+    Dim ang As Double
+    r = Sqr(xRel * xRel + yRel * yRel)
+    ang = Atn2(yRel, xRel)
+    ang = 2# * gapCenter - ang
+    xMir = r * Cos(ang)
+    yMir = r * Sin(ang)
+End Sub
 
 ' Builds one closed tooth-gap profile from involute parameters (metres, radians).
 Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Double, _
     ByVal z As Long, ByVal pa As Double, ByVal rb As Double, ByVal ra As Double, ByVal rf As Double) As Boolean
 
     Dim toothAngle As Double
-    Dim halfAngularPitch As Double
     Dim gapCenter As Double
-    Dim halfSpace As Double
+    Dim halfPitch As Double
     Dim invPA As Double
+    Dim baseGapArc As Double
+    Dim halfGapPitch As Double
     Dim rotA As Double
-    Dim rotB As Double
-    Dim involuteStartRadius As Double
+    Dim usePitchLimitedInvolute As Boolean
+    Dim negateTAtBase As Boolean
     Dim needsRootConnector As Boolean
     Dim tMin As Double
     Dim tMax As Double
@@ -95,29 +113,35 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
     If ra <= rb Then Exit Function
 
     toothAngle = 2# * Pi / CDbl(z)
-    halfAngularPitch = Pi / (2# * CDbl(z))
-    gapCenter = Pi / CDbl(z)
+    gapCenter = toothAngle / 2#
+    halfPitch = Pi / (2# * CDbl(z))
     invPA = Tan(pa) - pa
-    halfSpace = halfAngularPitch - invPA
-    If halfSpace <= 0# Then
-        ' Fine teeth (N > pi/(2*inv(alpha)) ~106 @ 20 deg PA): inv exceeds half pitch — use equal tooth/space.
-        DebugPrint "DrawInvoluteToothGapSketch: fine teeth clamp z=" & z & " pa=" & Format(pa * 180# / Pi, "0.##") & _
-            " deg halfSpace=" & Format(halfSpace, "0.######") & " -> " & Format(halfAngularPitch, "0.######") & " rad"
-        halfSpace = halfAngularPitch
-    End If
-    ' flankA = CCW flank (smaller angle), flankB = CW flank (larger angle) — same convention for all tooth counts
-    rotA = gapCenter - halfSpace
-    rotB = gapCenter + halfSpace
 
-    If rf >= rb Then
-        involuteStartRadius = rf
-        needsRootConnector = False
-    Else
-        involuteStartRadius = rb
+    ' Base-circle angular gap between flank tangent points: pi/z - 2*inv(alpha)
+    baseGapArc = toothAngle / 2# - 2# * invPA
+    halfGapPitch = halfPitch - invPA
+
+    If baseGapArc <= 0# Then
+        ' Involute cannot start on base circle — run pitch circle to addendum only
+        usePitchLimitedInvolute = True
+        halfGapPitch = halfPitch
         needsRootConnector = True
+        tMin = Tan(pa)
+        DebugPrint "DrawInvoluteToothGapSketch: baseGapArc=" & Format(baseGapArc, "0.######") & _
+            " rad <= 0 z=" & z & " -> pitch-limited involute, halfGapPitch=" & Format(halfGapPitch, "0.######")
+    ElseIf rf < rb Then
+        usePitchLimitedInvolute = False
+        needsRootConnector = True
+        tMin = 0#
+    Else
+        usePitchLimitedInvolute = False
+        needsRootConnector = False
+        tMin = Sqr((rf / rb) ^ 2# - 1#)
     End If
 
-    tMin = Sqr((involuteStartRadius / rb) ^ 2# - 1#)
+    rotA = gapCenter - halfGapPitch
+    negateTAtBase = needsRootConnector And Not usePitchLimitedInvolute
+
     tMax = Sqr((ra / rb) ^ 2# - 1#)
     If tMax <= tMin Then Exit Function
 
@@ -127,22 +151,18 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
 
     For i = 0 To INVOLUTE_SPLINE_POINT_COUNT
         t = tMin + (CDbl(i) * (tMax - tMin) / CDbl(INVOLUTE_SPLINE_POINT_COUNT))
-        If needsRootConnector Then
-            ' tMin = 0 at base circle: negate t so mirrored flanks diverge with opposite curvature
-            t = -t
-        End If
+        If negateTAtBase Then t = -t
         x = rb * (Cos(t) + t * Sin(t))
         y = rb * (Sin(t) - t * Cos(t))
         xa = x * Cos(rotA) - y * Sin(rotA)
         ya = x * Sin(rotA) + y * Cos(rotA)
-        xb = x * Cos(rotB) + y * Sin(rotB)
-        yb = x * Sin(rotB) - y * Cos(rotB)
+        MirrorPointAboutGapCenter gapCenter, xa, ya, xb, yb
         ptsA(i * 3 + 0) = cx + xa
         ptsA(i * 3 + 1) = cy + ya
         ptsA(i * 3 + 2) = 0#
-        ptsB((INVOLUTE_SPLINE_POINT_COUNT - i) * 3 + 0) = cx + xb
-        ptsB((INVOLUTE_SPLINE_POINT_COUNT - i) * 3 + 1) = cy + yb
-        ptsB((INVOLUTE_SPLINE_POINT_COUNT - i) * 3 + 2) = 0#
+        ptsB(i * 3 + 0) = cx + xb
+        ptsB(i * 3 + 1) = cy + yb
+        ptsB(i * 3 + 2) = 0#
     Next i
 
     On Error Resume Next
@@ -155,17 +175,17 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
 
     aStartX = ptsA(0)
     aStartY = ptsA(1)
-    bStartX = ptsB((nPts * 3) - 3)
-    bStartY = ptsB((nPts * 3) - 2)
+    bStartX = ptsB(0)
+    bStartY = ptsB(1)
     aOuterX = ptsA((INVOLUTE_SPLINE_POINT_COUNT) * 3 + 0)
     aOuterY = ptsA((INVOLUTE_SPLINE_POINT_COUNT) * 3 + 1)
-    bOuterX = ptsB(0)
-    bOuterY = ptsB(1)
+    bOuterX = ptsB((INVOLUTE_SPLINE_POINT_COUNT) * 3 + 0)
+    bOuterY = ptsB((INVOLUTE_SPLINE_POINT_COUNT) * 3 + 1)
 
     ' 3-point arc with midpoint on the short OD span (CreateArc direction flag wraps the long way).
     angOuterA = Atn2(aOuterY - cy, aOuterX - cx)
     angOuterB = Atn2(bOuterY - cy, bOuterX - cx)
-    angOuterMid = AverageAngleShortArc(angOuterA, angOuterB)
+    angOuterMid = ArcMidAngleShort(angOuterA, angOuterB)
     xOuterMid = cx + ra * Cos(angOuterMid)
     yOuterMid = cy + ra * Sin(angOuterMid)
     Set outerArc = swSketchManager.Create3PointArc(aOuterX, aOuterY, 0#, bOuterX, bOuterY, 0#, xOuterMid, yOuterMid, 0#)
@@ -175,7 +195,7 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
     End If
 
     If Not needsRootConnector Then
-        angRootMid = AverageAngleShortArc(Atn2(aStartY - cy, aStartX - cx), Atn2(bStartY - cy, bStartX - cx))
+        angRootMid = ArcMidAngleShort(Atn2(aStartY - cy, aStartX - cx), Atn2(bStartY - cy, bStartX - cx))
         xRootMidArc = cx + rf * Cos(angRootMid)
         yRootMidArc = cy + rf * Sin(angRootMid)
         Set rootArc = swSketchManager.Create3PointArc(bStartX, bStartY, 0#, aStartX, aStartY, 0#, xRootMidArc, yRootMidArc, 0#)
@@ -188,7 +208,7 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
         bRootY = cy + rf * Sin(angB)
         swSketchManager.CreateLine aRootX, aRootY, 0#, aStartX, aStartY, 0#
         swSketchManager.CreateLine bStartX, bStartY, 0#, bRootX, bRootY, 0#
-        angRootMid = AverageAngleShortArc(Atn2(aRootY - cy, aRootX - cx), Atn2(bRootY - cy, bRootX - cx))
+        angRootMid = ArcMidAngleShort(Atn2(aRootY - cy, aRootX - cx), Atn2(bRootY - cy, bRootX - cx))
         xRootMidArc = cx + rf * Cos(angRootMid)
         yRootMidArc = cy + rf * Sin(angRootMid)
         Set rootArc = swSketchManager.Create3PointArc(bRootX, bRootY, 0#, aRootX, aRootY, 0#, xRootMidArc, yRootMidArc, 0#)
@@ -200,11 +220,11 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
     End If
 
     DrawInvoluteToothGapSketch = True
-    DebugPrint "DrawInvoluteToothGapSketch OK z=" & z & " gapAng=" & Format(rotB - rotA, "0.######") & _
-        " rad pitchAng=" & Format(toothAngle, "0.######") & " rotA(CCW)=" & Format(rotA, "0.######") & _
-        " rotB(CW)=" & Format(rotB, "0.######") & " rb=" & Format(rb * MM_PER_M, "0.###") & _
-        " ra=" & Format(ra * MM_PER_M, "0.###") & " rf=" & Format(rf * MM_PER_M, "0.###") & " mm" & _
-        IIf(needsRootConnector, " (root connectors)", "")
+    DebugPrint "DrawInvoluteToothGapSketch OK z=" & z & " baseGapArc=" & Format(baseGapArc * 180# / Pi, "0.####") & _
+        " deg baseArcLen=" & Format(rb * baseGapArc * MM_PER_M, "0.###") & " mm rotA=" & Format(rotA, "0.######") & _
+        " rb=" & Format(rb * MM_PER_M, "0.###") & " ra=" & Format(ra * MM_PER_M, "0.###") & _
+        " rf=" & Format(rf * MM_PER_M, "0.###") & " mm" & _
+        IIf(usePitchLimitedInvolute, " (pitch-limited)", IIf(needsRootConnector, " (root connectors)", ""))
     On Error GoTo 0
 End Function
 
@@ -347,29 +367,117 @@ Private Function SelectGapSketchForCutAppend() As Boolean
     On Error GoTo 0
 End Function
 
-Private Function SelectCurrentGearBodyForCutScope() As Boolean
-    Dim swBody As SldWorks.Body2
-
-    SelectCurrentGearBodyForCutScope = False
-    Set swBody = GetCurrentGearSolidBody()
-    If swBody Is Nothing Then Exit Function
-
-    SelectCurrentGearBodyForCutScope = SelectSolidBodyWithMark(swBody, True, 8)
-    If SelectCurrentGearBodyForCutScope Then
-        DebugPrint "SelectCurrentGearBodyForCutScope OK: " & Trim$(swBody.name)
+' SelectByID2 returns Boolean but can arrive as Integer via COM — never use "If Not ok" on the raw value.
+Private Function SelectByID2Ok(ByVal result As Variant) As Boolean
+    On Error Resume Next
+    SelectByID2Ok = False
+    If IsEmpty(result) Then Exit Function
+    If VarType(result) = vbBoolean Then
+        SelectByID2Ok = result
+    Else
+        SelectByID2Ok = (CLng(result) <> 0)
     End If
+    On Error GoTo 0
 End Function
 
-Private Function SetCutFeatureScopeToCurrentGearBody(ByVal swCutFeat As SldWorks.Feature) As Boolean
+' Select gap sketch then target solid by feature/body name — matches recorded macro.
+Private Function SelectGapSketchAndBodyByNameForCut(ByVal skName As String, ByVal bodyName As String, ByVal scoped As Boolean) As Boolean
+    Dim docTitle As String
+    Dim selOk As Boolean
+
+    SelectGapSketchAndBodyByNameForCut = False
+    ClearSWSelection
+    Err.Clear
+
+    selOk = SelectByID2Ok(swModelDocExt.SelectByID2(skName, "SKETCH", 0#, 0#, 0#, False, 0, Nothing, 0))
+    If selOk = False Then
+        docTitle = swDoc.GetTitle
+        If docTitle <> "" Then
+            selOk = SelectByID2Ok(swModelDocExt.SelectByID2(skName & "@" & docTitle, "SKETCH", 0#, 0#, 0#, False, 0, Nothing, 0))
+        End If
+    End If
+    If selOk = False Then
+        DebugPrint "SelectGapSketchAndBodyByNameForCut: sketch FAIL """ & skName & """ err=" & Err.Number
+        Exit Function
+    End If
+    DebugPrint "SelectGapSketchAndBodyByNameForCut: sketch OK """ & skName & """"
+
+    If scoped Then
+        selOk = SelectByID2Ok(swModelDocExt.SelectByID2(bodyName, "SOLIDBODY", 0#, 0#, 0#, True, 8, Nothing, 0))
+        If selOk = False Then
+            docTitle = swDoc.GetTitle
+            If docTitle <> "" Then
+                selOk = SelectByID2Ok(swModelDocExt.SelectByID2(bodyName & "@" & docTitle, "SOLIDBODY", 0#, 0#, 0#, True, 8, Nothing, 0))
+            End If
+        End If
+        If selOk = False Then
+            DebugPrint "SelectGapSketchAndBodyByNameForCut: body FAIL """ & bodyName & """ err=" & Err.Number
+            Exit Function
+        End If
+        DebugPrint "SelectGapSketchAndBodyByNameForCut: body OK """ & bodyName & """ mark=8"
+    End If
+
+    DebugPrint "SelectGapSketchAndBodyByNameForCut: selCount=" & swSelMgr.GetSelectedObjectCount2(-1)
+    SelectGapSketchAndBodyByNameForCut = True
+End Function
+
+' Recorded macro FeatureCut4 for scoped multi-body: Sd=False, T1=9, T2=1, featScope=True, autoSelect=False.
+Private Function FeatureCut4RecordedScoped() As SldWorks.Feature
+    On Error Resume Next
+    Err.Clear
+    Set FeatureCut4RecordedScoped = swFeatMgr.FeatureCut4( _
+        False, False, False, _
+        SW_END_THROUGH_ALL_BOTH, SW_END_THROUGH_ALL, 0.01, 0.01, _
+        False, False, False, False, _
+        1.74532925199433E-02, 1.74532925199433E-02, _
+        False, False, False, False, _
+        False, _
+        True, False, _
+        True, True, False, _
+        SW_START_SKETCH_PLANE, 0#, False, False)
+    If FeatureCut4RecordedScoped Is Nothing Then
+        DebugPrint "FeatureCut4RecordedScoped FAIL: " & Err.Number & " " & Err.Description
+        Err.Clear
+    End If
+    On Error GoTo 0
+End Function
+
+' Single solid in part — sketch only, auto-select body.
+Private Function FeatureCut4RecordedSingleBody() As SldWorks.Feature
+    On Error Resume Next
+    Err.Clear
+    Set FeatureCut4RecordedSingleBody = swFeatMgr.FeatureCut4( _
+        False, False, False, _
+        SW_END_THROUGH_ALL_BOTH, SW_END_THROUGH_ALL, 0.01, 0.01, _
+        False, False, False, False, _
+        1.74532925199433E-02, 1.74532925199433E-02, _
+        False, False, False, False, _
+        False, _
+        False, True, _
+        False, False, False, _
+        SW_START_SKETCH_PLANE, 0#, False, False)
+    If FeatureCut4RecordedSingleBody Is Nothing Then
+        DebugPrint "FeatureCut4RecordedSingleBody FAIL: " & Err.Number & " " & Err.Description
+        Err.Clear
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function SetCutFeatureScopeToCurrentGearBody(ByVal swCutFeat As SldWorks.Feature, _
+    Optional ByVal swTargetBody As SldWorks.Body2 = Nothing) As Boolean
+
     Dim swDef As Object
     Dim swBody As SldWorks.Body2
     Dim bodyArr(0) As Object
     Dim vBodies As Variant
+    Dim bodyLabel As String
 
     SetCutFeatureScopeToCurrentGearBody = False
     If swCutFeat Is Nothing Then Exit Function
-    Set swBody = GetCurrentGearSolidBody()
+    Set swBody = swTargetBody
+    If swBody Is Nothing Then Set swBody = NameAndResolveCurrentGearSolidBody("cut scope")
     If swBody Is Nothing Then Exit Function
+    bodyLabel = Trim$(swBody.name)
 
     On Error Resume Next
     Set swDef = swCutFeat.GetDefinition
@@ -387,130 +495,58 @@ Private Function SetCutFeatureScopeToCurrentGearBody(ByVal swCutFeat As SldWorks
     SetCutFeatureScopeToCurrentGearBody = swCutFeat.ModifyDefinition(swDef, swPart, Nothing)
     swDef.ReleaseSelectionAccess
     If SetCutFeatureScopeToCurrentGearBody Then
-        DebugPrint "SetCutFeatureScopeToCurrentGearBody OK"
+        DebugPrint "SetCutFeatureScopeToCurrentGearBody OK body=""" & bodyLabel & """"
     Else
-        DebugPrint "SetCutFeatureScopeToCurrentGearBody failed: " & Err.Number & " " & Err.Description
+        DebugPrint "SetCutFeatureScopeToCurrentGearBody failed body=""" & bodyLabel & """: " & Err.Number & " " & Err.Description
         Err.Clear
     End If
     On Error GoTo 0
 End Function
 
-Private Function TryCreateGapCutFeature(ByRef methodUsed As String) As SldWorks.Feature
-    Dim lastErr As Long
-    Dim lastDesc As String
+Private Function TryCreateGapCutFeature(ByRef methodUsed As String, ByVal swTargetBody As SldWorks.Body2) As SldWorks.Feature
+    Dim skName As String
+    Dim bodyName As String
     Dim useScope As Boolean
-    Dim useFeatScope As Boolean
-    Dim useAutoSelect As Boolean
-    Dim startCond As Long
-    Dim startOff As Double
 
     Set TryCreateGapCutFeature = Nothing
     methodUsed = ""
     useScope = PartNeedsCutFeatureScope()
-    useFeatScope = useScope
-    useAutoSelect = Not useScope
-    GetGearExtrudeStartParams startCond, startOff
-    LogCutExtrudeParams startCond, startOff, useFeatScope, swSelMgr.GetSelectedObjectCount2(-1), GearGeom.RimWidthMM
-    On Error Resume Next
 
-    Err.Clear
-    Set TryCreateGapCutFeature = swFeatMgr.FeatureCut4( _
-        True, False, False, _
-        SW_END_BLIND, SW_END_BLIND, GearGeom.RimWidthM, 0#, _
-        False, False, False, False, _
-        0#, 0#, _
-        False, False, False, False, _
-        False, _
-        useFeatScope, useAutoSelect, _
-        False, False, False, _
-        startCond, startOff, False, False)
-    If Not TryCreateGapCutFeature Is Nothing Then
-        methodUsed = "FeatureCut4 Blind rim width"
-        Exit Function
+    skName = GetGapSketchFeatName()
+    If skName = "" And Not swToothGapSketchFeat Is Nothing Then skName = swToothGapSketchFeat.Name
+    If skName = "" Then skName = BuildGearPrefixName() & "_Gap"
+
+    bodyName = BuildGearBodyName()
+    If Not swTargetBody Is Nothing Then
+        If Trim$(swTargetBody.name) <> "" Then bodyName = Trim$(swTargetBody.name)
     End If
-    lastErr = Err.Number: lastDesc = Err.Description: Err.Clear
 
-    Set TryCreateGapCutFeature = swFeatMgr.FeatureCut4( _
-        True, False, False, _
-        SW_END_THROUGH_ALL, SW_END_BLIND, 0#, 0#, _
-        False, False, False, False, _
-        0#, 0#, _
-        False, False, False, False, _
-        False, _
-        useFeatScope, useAutoSelect, _
-        False, False, False, _
-        startCond, startOff, False, False)
-    If Not TryCreateGapCutFeature Is Nothing Then
-        methodUsed = "FeatureCut4 Through all"
-        Exit Function
-    End If
-    lastErr = Err.Number: lastDesc = Err.Description: Err.Clear
+    DebugPrint "TryCreateGapCutFeature: scoped=" & useScope & " sketch=""" & skName & """ body=""" & bodyName & """"
 
-    Set TryCreateGapCutFeature = swFeatMgr.FeatureCut4( _
-        True, False, False, _
-        SW_END_BLIND, SW_END_BLIND, GearGeom.WidthM, 0#, _
-        False, False, False, False, _
-        0#, 0#, _
-        False, False, False, False, _
-        False, _
-        useFeatScope, useAutoSelect, _
-        False, False, False, _
-        startCond, startOff, False, False)
-    If Not TryCreateGapCutFeature Is Nothing Then
-        methodUsed = "FeatureCut4 Blind full width"
+    If Not SelectGapSketchAndBodyByNameForCut(skName, bodyName, useScope) Then
+        NoteGearBuildError "TryCreateGapCutFeature: SelectByID2 failed sketch=""" & skName & """ body=""" & bodyName & """"
         Exit Function
     End If
 
-    If gLastGearBuildError = "" Then
-        NoteGearBuildError "TryCreateGapCutFeature failed: " & lastErr & " " & lastDesc
-    End If
-
-    ' Scoped pre-select + offset start often fails — retry sketch-only then set scope after.
     If useScope Then
-        ClearSWSelection
-        If SelectGapSketchForCut() Then
-            Err.Clear
-            Set TryCreateGapCutFeature = swFeatMgr.FeatureCut4( _
-                True, False, False, _
-                SW_END_BLIND, SW_END_BLIND, GearGeom.RimWidthM, 0#, _
-                False, False, False, False, _
-                0#, 0#, _
-                False, False, False, False, _
-                False, _
-                False, True, _
-                False, False, False, _
-                SW_START_SKETCH_PLANE, 0#, False, False)
-            If Not TryCreateGapCutFeature Is Nothing Then
-                methodUsed = "FeatureCut4 Blind rim (sketch-only retry)"
-                Exit Function
-            End If
-            Err.Clear
-            Set TryCreateGapCutFeature = swFeatMgr.FeatureCut4( _
-                True, False, False, _
-                SW_END_THROUGH_ALL, SW_END_BLIND, 0#, 0#, _
-                False, False, False, False, _
-                0#, 0#, _
-                False, False, False, False, _
-                False, _
-                False, True, _
-                False, False, False, _
-                SW_START_SKETCH_PLANE, 0#, False, False)
-            If Not TryCreateGapCutFeature Is Nothing Then
-                methodUsed = "FeatureCut4 Through all (sketch-only retry)"
-                Exit Function
-            End If
-            lastErr = Err.Number: lastDesc = Err.Description: Err.Clear
-        End If
+        Set TryCreateGapCutFeature = FeatureCut4RecordedScoped()
+        methodUsed = "FeatureCut4 recorded (Sd=False T1=9 T2=1 featScope=True autoSelect=False)"
+    Else
+        Set TryCreateGapCutFeature = FeatureCut4RecordedSingleBody()
+        methodUsed = "FeatureCut4 recorded single-body (autoSelect=True)"
     End If
 
-    On Error GoTo 0
+    If TryCreateGapCutFeature Is Nothing Then
+        NoteGearBuildError "TryCreateGapCutFeature: FeatureCut4 returned Nothing"
+    End If
 End Function
 
 Public Function CutExtrudeToothGap() As Boolean
     On Error GoTo CutFail
     Dim methodUsed As String
-    Dim selCount As Long
+    Dim swTargetBody As SldWorks.Body2
 
+    ClearLastGearBuildError
     DebugPrint "CutExtrudeToothGap: begin depth=" & Format(GearGeom.RimWidthMM, "0.###") & " mm"
     If swToothGapSketchFeat Is Nothing Then Set swToothGapSketchFeat = FindLastSketchFeature()
     If swToothGapSketchFeat Is Nothing Then
@@ -521,39 +557,25 @@ Public Function CutExtrudeToothGap() As Boolean
 
     RebuildSWPart
     ExitActiveSketchIfAny
-    If Not SelectGapSketchForCut() Then
-        NoteGearBuildError "CutExtrudeToothGap: sketch select failed (" & swToothGapSketchFeat.name & ")"
-        DebugPrint gLastGearBuildError
+    Set swTargetBody = NameAndResolveCurrentGearSolidBody("before cut")
+    If swTargetBody Is Nothing Then
+        NoteGearBuildError "CutExtrudeToothGap: could not name/resolve gear solid body before cut"
         GoTo CutFail
     End If
 
-    If PartNeedsCutFeatureScope() Then
-        If SelectCurrentGearBodyForCutScope() Then
-            If Not SelectGapSketchForCutAppend() Then
-                DebugPrint "CutExtrudeToothGap: warning — could not re-select sketch after body scope"
-            End If
-        Else
-            DebugPrint "CutExtrudeToothGap: warning — could not pre-select body for feature scope"
-        End If
-    End If
-
-    selCount = swSelMgr.GetSelectedObjectCount2(-1)
-    DebugPrint "CutExtrudeToothGap: selections before cut, count=" & selCount
-
-    Set swToothCutFeat = TryCreateGapCutFeature(methodUsed)
+    Set swToothCutFeat = TryCreateGapCutFeature(methodUsed, swTargetBody)
     If swToothCutFeat Is Nothing Then
         If gLastGearBuildError = "" Then NoteGearBuildError "CutExtrudeToothGap: TryCreateGapCutFeature returned Nothing"
         GoTo CutFail
     End If
 
-    If Not GetCurrentGearSolidBody() Is Nothing Then
-        SetCutFeatureScopeToCurrentGearBody swToothCutFeat
-    End If
+    Set swTargetBody = NameAndResolveCurrentGearSolidBody("after cut")
 
     DebugPrint "Tooth gap cut feature: " & swToothCutFeat.name & " (" & methodUsed & _
-        IIf(PartNeedsCutFeatureScope(), ", scoped to current gear body)", ")")
+        IIf(PartNeedsCutFeatureScope(), ", scoped to """ & Trim$(swTargetBody.name) & """)", ")")
     ClearSWSelection
     RebuildSWPart
+    ClearLastGearBuildError
     DebugPrint "CutExtrudeToothGap OK"
     CutExtrudeToothGap = True
     Exit Function

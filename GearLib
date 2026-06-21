@@ -259,7 +259,7 @@ Public Sub LogGearBuildBanner(ByVal sectionTitle As String)
     DebugPrint "========== " & sectionTitle & " =========="
 End Sub
 
-Private Sub LogGearBodyBox(ByVal label As String, ByVal swBody As SldWorks.Body2)
+Public Sub LogGearBodyBox(ByVal label As String, ByVal swBody As SldWorks.Body2)
     Dim vBox As Variant
     On Error Resume Next
     If swBody Is Nothing Then
@@ -627,26 +627,165 @@ Public Function GetCurrentGearIndex() As Long
     GetCurrentGearIndex = gCurrentGearIndex
 End Function
 
-' Solid body from the current addendum boss (Face2.GetBody â€” reliable; GetBodies2 order is not creation order)
-Public Function GetCurrentGearSolidBody() As SldWorks.Body2
-    Dim swFace As SldWorks.Face2
+' Solid body from the current addendum boss (Face2.GetBody — reliable; GetBodies2 order is not creation order)
+Private Function GetGearBodyBottomZMFromBody(ByVal swBody As SldWorks.Body2) As Double
+    Dim vBox As Variant
+    GetGearBodyBottomZMFromBody = 0#
+    On Error Resume Next
+    If swBody Is Nothing Then Exit Function
+    vBox = swBody.GetBodyBox()
+    If IsArray(vBox) And UBound(vBox) >= 5 Then GetGearBodyBottomZMFromBody = vBox(2)
+    On Error GoTo 0
+End Function
+
+Private Function GetGearBodyTopZMFromBody(ByVal swBody As SldWorks.Body2) As Double
+    Dim vBox As Variant
+    GetGearBodyTopZMFromBody = 0#
+    On Error Resume Next
+    If swBody Is Nothing Then Exit Function
+    vBox = swBody.GetBodyBox()
+    If IsArray(vBox) And UBound(vBox) >= 5 Then GetGearBodyTopZMFromBody = vBox(5)
+    On Error GoTo 0
+End Function
+
+' Right-plane revolve profile uses +Zoffset in sketch X; solid ends up at part Z = -Zoffset (stack grows -Z).
+Public Sub GetCurrentGearPartZSpanM(ByRef zMaxM As Double, ByRef zMinM As Double)
+    zMaxM = -gBossStartOffsetZM
+    If GearGeom.HubWidthM > 0.0000000001 Then
+        zMinM = zMaxM - GearGeom.WidthM
+        zMaxM = zMaxM + GearGeom.HubWidthM
+    Else
+        zMinM = zMaxM - GearGeom.RimWidthM
+    End If
+End Sub
+
+Public Function GetCurrentGearGapPlaneOffsetM() As Double
+    GetCurrentGearGapPlaneOffsetM = -gBossStartOffsetZM
+End Function
+
+' Stacked / multi-body: pick the solid whose axial span matches this gear's revolve blank (Zoffset + rim width).
+Private Function FindSolidBodyByCurrentGearAxialSpan() As SldWorks.Body2
     Dim vBodies As Variant
-    Dim idx As Long
+    Dim swBody As SldWorks.Body2
+    Dim i As Long
+    Dim expectZMin As Double
+    Dim expectZMax As Double
+    Dim zMin As Double
+    Dim zMax As Double
+    Dim tol As Double
+    Dim bestScore As Double
+    Dim score As Double
+
+    Set FindSolidBodyByCurrentGearAxialSpan = Nothing
+    If swPart Is Nothing Then Exit Function
+
+    GetCurrentGearPartZSpanM expectZMax, expectZMin
+    tol = 0.00005   ' 0.05 mm
 
     On Error Resume Next
+    vBodies = swPart.GetBodies2(swSolidBody, False)
+    On Error GoTo 0
+    If Not IsArray(vBodies) Then Exit Function
+
+    bestScore = 1E+30
+    For i = LBound(vBodies) To UBound(vBodies)
+        Set swBody = vBodies(i)
+        If swBody Is Nothing Then GoTo NextAxialBody
+        zMin = GetGearBodyBottomZMFromBody(swBody)
+        zMax = GetGearBodyTopZMFromBody(swBody)
+        If Abs(zMin - expectZMin) <= tol And Abs(zMax - expectZMax) <= tol * 3# Then
+            Set FindSolidBodyByCurrentGearAxialSpan = swBody
+            DebugPrint "FindSolidBodyByCurrentGearAxialSpan: exact match """ & Trim$(swBody.name) & _
+                """ Z mm=[" & Format(zMin * MM_PER_M, "0.###") & ".." & Format(zMax * MM_PER_M, "0.###") & _
+                "] expected [" & Format(expectZMin * MM_PER_M, "0.###") & ".." & Format(expectZMax * MM_PER_M, "0.###") & "]"
+            Exit Function
+        End If
+        score = Abs(zMin - expectZMin) + Abs(zMax - expectZMax)
+        If score < bestScore Then
+            bestScore = score
+            Set FindSolidBodyByCurrentGearAxialSpan = swBody
+        End If
+NextAxialBody:
+    Next i
+
+    If Not FindSolidBodyByCurrentGearAxialSpan Is Nothing Then
+        Set swBody = FindSolidBodyByCurrentGearAxialSpan
+        DebugPrint "FindSolidBodyByCurrentGearAxialSpan: best match """ & Trim$(swBody.name) & _
+            """ Z mm=[" & Format(GetGearBodyBottomZMFromBody(swBody) * MM_PER_M, "0.###") & _
+            ".." & Format(GetGearBodyTopZMFromBody(swBody) * MM_PER_M, "0.###") & _
+            "] score=" & Format(bestScore * MM_PER_M, "0.###") & " mm"
+    End If
+End Function
+
+Public Function RefreshSolidBodyFromPart(ByVal swBody As SldWorks.Body2) As SldWorks.Body2
+    Dim bodyName As String
+
+    Set RefreshSolidBodyFromPart = swBody
+    If swBody Is Nothing Or swPart Is Nothing Then Exit Function
+    bodyName = Trim$(swBody.name)
+    If bodyName = "" Then Exit Function
+    Set RefreshSolidBodyFromPart = FindSolidBodyByName(swPart, bodyName)
+    If RefreshSolidBodyFromPart Is Nothing Then Set RefreshSolidBodyFromPart = swBody
+End Function
+
+Public Function GetCurrentGearSolidBody() As SldWorks.Body2
+    Dim swFace As SldWorks.Face2
+    Dim swBody As SldWorks.Body2
+    Dim vBodies As Variant
+    Dim bodyName As String
+
+    On Error Resume Next
+
+    bodyName = BuildGearBodyName()
+    If bodyName <> "" Then
+        Set swBody = FindSolidBodyByName(swPart, bodyName)
+        If Not swBody Is Nothing Then
+            Set GetCurrentGearSolidBody = swBody
+            DebugPrint "GetCurrentGearSolidBody: by name """ & bodyName & """"
+            Exit Function
+        End If
+    End If
+
     If Not swAddendumExtrudeFeat Is Nothing Then
+        bodyName = Trim$(swAddendumExtrudeFeat.name)
+        If bodyName <> "" Then
+            Set swBody = FindSolidBodyByName(swPart, bodyName)
+            If Not swBody Is Nothing Then
+                Set GetCurrentGearSolidBody = swBody
+                DebugPrint "GetCurrentGearSolidBody: by revolve feat name """ & bodyName & """"
+                Exit Function
+            End If
+        End If
         Set swFace = FindAddendumCylindricalFace()
         If Not swFace Is Nothing Then
-            Set GetCurrentGearSolidBody = swFace.GetBody
-            If Not GetCurrentGearSolidBody Is Nothing Then Exit Function
+            Set swBody = RefreshSolidBodyFromPart(swFace.GetBody)
+            If Not swBody Is Nothing Then
+                Set GetCurrentGearSolidBody = swBody
+                DebugPrint "GetCurrentGearSolidBody: from revolve OD face -> """ & Trim$(swBody.name) & """"
+                Exit Function
+            End If
+        End If
+    End If
+
+    If PartNeedsCutFeatureScope() Or GearTrainRole = GEAR_ROLE_STACKED Or gBossStartOffsetZM > 0.0000000001 Then
+        Set swBody = FindSolidBodyByCurrentGearAxialSpan()
+        If Not swBody Is Nothing Then
+            Set GetCurrentGearSolidBody = swBody
+            Exit Function
         End If
     End If
 
     If swPart Is Nothing Then Exit Function
     vBodies = swPart.GetBodies2(swSolidBody, False)
-    If Not IsArray(vBodies) Then Exit Function
-    idx = UBound(vBodies)
-    Set GetCurrentGearSolidBody = vBodies(idx)
+    If IsArray(vBodies) Then
+        If UBound(vBodies) - LBound(vBodies) = 0 Then
+            Set GetCurrentGearSolidBody = vBodies(LBound(vBodies))
+            DebugPrint "GetCurrentGearSolidBody: sole body """ & Trim$(GetCurrentGearSolidBody.name) & """"
+        Else
+            DebugPrint "GetCurrentGearSolidBody WARN: could not resolve body among " & _
+                (UBound(vBodies) - LBound(vBodies) + 1) & " solids — not using arbitrary index"
+        End If
+    End If
     On Error GoTo 0
 End Function
 
@@ -692,11 +831,11 @@ Public Function GearNeedsGapOffsetPlane() As Boolean
     GearNeedsGapOffsetPlane = (gBossStartOffsetZM > 0.0000000001)
 End Function
 
-' Plane parallel to Front Plane at gearN_Zoffset (stacked gear tooth-gap sketch plane).
+' Plane parallel to Front at part Z = -gearN_Zoffset (matches Right-plane revolve stack direction).
 Private Function InsertGapPlaneOffsetFromFront(ByVal offsetM As Double) As SldWorks.Feature
     On Error Resume Next
     Set InsertGapPlaneOffsetFromFront = Nothing
-    If offsetM <= 0.0000000001 Then Exit Function
+    If Abs(offsetM) <= 0.0000000001 Then Exit Function
     If swFrontPlaneFeat Is Nothing Then
         If Not ResolveAndStoreFrontPlane() Then Exit Function
     End If
@@ -743,18 +882,20 @@ Public Function GetOrCreateGearGapPlaneFeat() As SldWorks.Feature
         Exit Function
     End If
 
-    Set swPlane = InsertGapPlaneOffsetFromFront(gBossStartOffsetZM)
+    Set swPlane = InsertGapPlaneOffsetFromFront(GetCurrentGearGapPlaneOffsetM())
     If swPlane Is Nothing Then
-        DebugPrint "GetOrCreateGearGapPlaneFeat: InsertGapPlaneOffsetFromFront failed offset mm=" & _
-            Format(gBossStartOffsetZM * MM_PER_M, "0.###")
+        DebugPrint "GetOrCreateGearGapPlaneFeat: InsertGapPlaneOffsetFromFront failed partZ mm=" & _
+            Format(GetCurrentGearGapPlaneOffsetM() * MM_PER_M, "0.###") & " (Zoffset=" & _
+            Format(gBossStartOffsetZM * MM_PER_M, "0.###") & ")"
         Exit Function
     End If
 
     RenameSketchFeatureSafe swPlane, planeName
     RebuildSWPart
     Set GetOrCreateGearGapPlaneFeat = swPlane
-    DebugPrint "GetOrCreateGearGapPlaneFeat: created " & planeName & " at Zoffset mm=" & _
-        Format(gBossStartOffsetZM * MM_PER_M, "0.###")
+    DebugPrint "GetOrCreateGearGapPlaneFeat: created " & planeName & " at part Z mm=" & _
+        Format(GetCurrentGearGapPlaneOffsetM() * MM_PER_M, "0.###") & " (Zoffset=" & _
+        Format(gBossStartOffsetZM * MM_PER_M, "0.###") & ")"
 End Function
 
 ' Front Plane for driving / first gear; offset GapPlane for stacked gears at gearN_Zoffset.
@@ -772,8 +913,9 @@ Public Function BeginSketchOnGapPlane() As Boolean
         BeginSketchOnGapPlane = BeginSketchOnPlaneFeat(swPlane)
         If BeginSketchOnGapPlane Then
             gGapSketchOnOffsetPlane = True
-            DebugPrint "BeginSketchOnGapPlane: on " & swPlane.name & " (Zoffset mm=" & _
-                Format(gBossStartOffsetZM * MM_PER_M, "0.###") & ")"
+            DebugPrint "BeginSketchOnGapPlane: on " & swPlane.name & " (part Z mm=" & _
+                Format(GetCurrentGearGapPlaneOffsetM() * MM_PER_M, "0.###") & _
+                ", Zoffset=" & Format(gBossStartOffsetZM * MM_PER_M, "0.###") & ")"
         End If
     Else
         BeginSketchOnGapPlane = BeginSketchOnFrontPlane()
@@ -2652,6 +2794,9 @@ Public Function FindAddendumCylindricalFace() As SldWorks.Face2
     Dim i As Long
     Dim swFace As SldWorks.Face2
     Dim swSurf As SldWorks.Surface
+    Dim cylParams As Variant
+    Dim r As Double
+    Dim bestR As Double
 
     Set FindAddendumCylindricalFace = Nothing
     If swAddendumExtrudeFeat Is Nothing Then Exit Function
@@ -2659,14 +2804,20 @@ Public Function FindAddendumCylindricalFace() As SldWorks.Face2
     vFaces = swAddendumExtrudeFeat.GetFaces
     On Error GoTo 0
     If Not IsArray(vFaces) Then Exit Function
+    bestR = 0#
     For i = LBound(vFaces) To UBound(vFaces)
         Set swFace = vFaces(i)
         If Not swFace Is Nothing Then
             Set swSurf = swFace.GetSurface
             If Not swSurf Is Nothing Then
                 If swSurf.IsCylinder() Then
-                    Set FindAddendumCylindricalFace = swFace
-                    Exit Function
+                    cylParams = swSurf.CylinderParams
+                    r = 0#
+                    If IsArray(cylParams) And UBound(cylParams) >= 6 Then r = cylParams(6)
+                    If r >= bestR Then
+                        bestR = r
+                        Set FindAddendumCylindricalFace = swFace
+                    End If
                 End If
             End If
         End If
@@ -3337,26 +3488,71 @@ Public Function IsMacroGearBody(ByVal swBody As SldWorks.Body2, ByVal swPartDoc 
     IsMacroGearBody = ReadGearMetadataFromBody(swBody, swPartDoc, modMM, z, pa, w)
 End Function
 
-Public Sub NameGearSolidBodyAfterBuild()
-    Dim swBody As SldWorks.Body2
+' Name then return the current gear solid (by BuildGearBodyName) for cut scope / selection.
+Public Function NameAndResolveCurrentGearSolidBody(Optional ByVal stageLabel As String = "") As SldWorks.Body2
     Dim newName As String
+    Dim oldName As String
+    Dim swBody As SldWorks.Body2
+    Dim swFace As SldWorks.Face2
+    Dim revolveName As String
 
-    DebugPrint "NameGearSolidBodyAfterBuild: begin"
-    On Error Resume Next
+    Set NameAndResolveCurrentGearSolidBody = Nothing
     newName = BuildGearBodyName()
     If swPart Is Nothing Then
-        DebugPrint "NameGearSolidBodyAfterBuild: no swPart"
-        Exit Sub
+        DebugPrint "NameAndResolveCurrentGearSolidBody: no swPart" & BodyNameStageSuffix(stageLabel)
+        Exit Function
     End If
 
-    Set swBody = GetCurrentGearSolidBody()
-    If swBody Is Nothing Then
-        DebugPrint "NameGearSolidBodyAfterBuild: no solid body found"
-        Exit Sub
+    Set swBody = Nothing
+    If Not swAddendumExtrudeFeat Is Nothing Then
+        revolveName = Trim$(swAddendumExtrudeFeat.Name)
+        If revolveName <> "" Then Set swBody = FindSolidBodyByName(swPart, revolveName)
+        If swBody Is Nothing Then
+            Set swFace = FindAddendumCylindricalFace()
+            If Not swFace Is Nothing Then Set swBody = RefreshSolidBodyFromPart(swFace.GetBody)
+        End If
     End If
+    If swBody Is Nothing Then Set swBody = FindSolidBodyByName(swPart, newName)
+    If swBody Is Nothing Then Set swBody = GetCurrentGearSolidBody()
+    If swBody Is Nothing Then
+        DebugPrint "NameAndResolveCurrentGearSolidBody: no solid body found" & BodyNameStageSuffix(stageLabel) & _
+            " target=" & newName
+        Exit Function
+    End If
+
+    On Error Resume Next
+    oldName = Trim$(swBody.name)
     swBody.name = newName
-    DebugPrint "Named gear solid body: " & newName
+    If Err.Number <> 0 Then
+        DebugPrint "NameAndResolveCurrentGearSolidBody FAIL" & BodyNameStageSuffix(stageLabel) & _
+            " err=" & Err.Number & " " & Err.Description
+        Err.Clear
+    Else
+        DebugPrint "NameAndResolveCurrentGearSolidBody" & BodyNameStageSuffix(stageLabel) & _
+            ": """ & oldName & """ -> """ & newName & """"
+    End If
     On Error GoTo 0
+
+    Set swBody = FindSolidBodyByName(swPart, newName)
+    If swBody Is Nothing Then Set swBody = GetCurrentGearSolidBody()
+    Set NameAndResolveCurrentGearSolidBody = swBody
+End Function
+
+Public Sub NameCurrentGearSolidBody(Optional ByVal stageLabel As String = "")
+    Dim unused As SldWorks.Body2
+    Set unused = NameAndResolveCurrentGearSolidBody(stageLabel)
+End Sub
+
+Private Function BodyNameStageSuffix(ByVal stageLabel As String) As String
+    If Trim$(stageLabel) <> "" Then
+        BodyNameStageSuffix = " (" & Trim$(stageLabel) & ")"
+    Else
+        BodyNameStageSuffix = ""
+    End If
+End Function
+
+Public Sub NameGearSolidBodyAfterBuild()
+    NameCurrentGearSolidBody "after build"
 End Sub
 
 
@@ -3934,18 +4130,37 @@ End Function
 Public Function SelectSolidBodyWithMark(ByVal swBody As SldWorks.Body2, ByVal append As Boolean, ByVal mark As Long) As Boolean
     Dim sd As SldWorks.SelectData
     Dim bodyName As String
+    Dim docTitle As String
+    Dim swFace As SldWorks.Face2
     On Error Resume Next
     SelectSolidBodyWithMark = False
     If swBody Is Nothing Then Exit Function
+    Set swBody = RefreshSolidBodyFromPart(swBody)
+    bodyName = Trim$(swBody.name)
+
+    If bodyName <> "" Then
+        docTitle = swDoc.GetTitle
+        If docTitle <> "" Then
+            SelectSolidBodyWithMark = swModelDocExt.SelectByID2(bodyName & "@" & docTitle, "SOLIDBODY", 0#, 0#, 0#, append, mark, Nothing, 0)
+        End If
+        If Not SelectSolidBodyWithMark Then
+            SelectSolidBodyWithMark = swModelDocExt.SelectByID2(bodyName, "SOLIDBODY", 0#, 0#, 0#, append, mark, Nothing, 0)
+        End If
+        If SelectSolidBodyWithMark Then Exit Function
+    End If
+
     Set sd = swSelMgr.CreateSelectData
     If Not sd Is Nothing Then
         sd.mark = mark
         SelectSolidBodyWithMark = swBody.Select4(append, sd)
         If SelectSolidBodyWithMark Then Exit Function
     End If
-    bodyName = Trim$(swBody.name)
-    If bodyName <> "" Then
-        SelectSolidBodyWithMark = swModelDocExt.SelectByID2(bodyName, "SOLIDBODY", 0#, 0#, 0#, append, mark, Nothing, 0)
+    Set swFace = FindAddendumCylindricalFace()
+    If Not swFace Is Nothing Then
+        If StrComp(Trim$(swFace.GetBody.name), bodyName, vbTextCompare) = 0 Then
+            If Not sd Is Nothing Then sd.mark = mark
+            SelectSolidBodyWithMark = swFace.Select4(append, sd)
+        End If
     End If
     On Error GoTo 0
 End Function
@@ -4123,16 +4338,6 @@ Private Function GetGearBodyCenterFromBodyBoxM(ByVal swBody As SldWorks.Body2, B
     xM = (vBox(0) + vBox(3)) / 2#
     yM = (vBox(1) + vBox(4)) / 2#
     GetGearBodyCenterFromBodyBoxM = True
-    On Error GoTo 0
-End Function
-
-Private Function GetGearBodyTopZMFromBody(ByVal swBody As SldWorks.Body2) As Double
-    Dim vBox As Variant
-    GetGearBodyTopZMFromBody = 0#
-    On Error Resume Next
-    If swBody Is Nothing Then Exit Function
-    vBox = swBody.GetBodyBox()
-    If IsArray(vBox) And UBound(vBox) >= 5 Then GetGearBodyTopZMFromBody = vBox(5)
     On Error GoTo 0
 End Function
 

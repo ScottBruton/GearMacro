@@ -134,6 +134,7 @@ Public Function CircularPatternTooth() As Boolean
     Dim axisName As String
 
     stepDetail = "resolve refs"
+    ClearLastGearBuildError
     DebugPrint "CircularPatternTooth: begin z=" & GearGeom.NumTeeth
     gUseSketchCenterlineAsAxis = False
     If swGearAxisFeat Is Nothing Then
@@ -147,10 +148,11 @@ Public Function CircularPatternTooth() As Boolean
     End If
     ResolveToothCutForPattern
     If swToothCutFeat Is Nothing Then
-        NoteGearBuildError "CircularPatternTooth: missing tooth gap cut"
+        NoteGearBuildError "CircularPatternTooth: missing tooth gap cut for current build"
         DebugPrint gLastGearBuildError
         GoTo PatternFail
     End If
+    DebugPrint "CircularPatternTooth: seed cut=" & swToothCutFeat.Name
     If GearTrainRoleIsDrivenOrStacked() Then
         RebuildSWPart
         If swGearAxisFeat Is Nothing Or gDrivenPatternUsesBossFace Then TryCreateDrivenRefAxisFromBossFace
