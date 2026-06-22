@@ -14,6 +14,7 @@ Private Const SW_END_BLIND As Long = 0
 Private Const SW_END_THROUGH_ALL As Long = 1
 Private Const SW_END_THROUGH_ALL_BOTH As Long = 9   ' swEndConditions_e.swEndCondThroughAllBoth
 Private Const SW_START_SKETCH_PLANE As Long = 0
+Private Const SW_CONSTRAINED_CORNER_DELETE_GEOMETRY As Long = 1   ' swConstrainedCornerAction_e
 Private Const INVOLUTE_SPLINE_POINT_COUNT As Long = 30
 
 Private mGapSketchFeatName As String
@@ -91,6 +92,121 @@ Private Function InvoluteGapAngularWidthAtT(ByVal t As Double, ByVal rb As Doubl
 End Function
 
 ' Pitch-limited stub teeth: find halfGapPitch so measured gap at pitch circle = pi/z.
+' Root fillet radius (m) — GapArcLength * McMaster ratio from CalculateGearGeometry.
+Private Function GetGapRootFilletRadiusM() As Double
+    Dim rMM As Double
+    If GearGeom.GapRootFilletMM > 0# Then
+        rMM = GearGeom.GapRootFilletMM
+    Else
+        rMM = GearGeom.moduleMM * Pi * GEAR_MCM_ROOT_FILLET_RATIO
+    End If
+    GetGapRootFilletRadiusM = rMM / MM_PER_M
+End Function
+
+Private Function SelectTwoSketchSegmentsForFillet(ByVal swSeg1 As SldWorks.SketchSegment, _
+    ByVal swSeg2 As SldWorks.SketchSegment) As Boolean
+
+    SelectTwoSketchSegmentsForFillet = False
+    If swSeg1 Is Nothing Or swSeg2 Is Nothing Then Exit Function
+    ClearSWSelection
+    On Error Resume Next
+    If Not swSeg1.Select4(False, Nothing) Then Exit Function
+    If Not swSeg2.Select4(True, Nothing) Then Exit Function
+    SelectTwoSketchSegmentsForFillet = (swSelMgr.GetSelectedObjectCount2(-1) >= 2)
+    On Error GoTo 0
+End Function
+
+Private Function SelectSketchSegmentByName(ByVal segName As String, ByVal append As Boolean) As Boolean
+    On Error Resume Next
+    SelectSketchSegmentByName = swModelDocExt.SelectByID2(segName, "SKETCHSEGMENT", 0#, 0#, 0#, append, 0, Nothing, 0)
+    On Error GoTo 0
+End Function
+
+Private Function AddSketchFilletBetweenSegments(ByVal swSeg1 As SldWorks.SketchSegment, _
+    ByVal swSeg2 As SldWorks.SketchSegment, ByVal radiusM As Double, _
+    ByVal filletLabel As String, _
+    Optional ByVal seg1Name As String = "", Optional ByVal seg2Name As String = "") As Boolean
+
+    Dim swFillet As SldWorks.SketchSegment
+    AddSketchFilletBetweenSegments = False
+    If radiusM <= 0# Then Exit Function
+    If Not SelectTwoSketchSegmentsForFillet(swSeg1, swSeg2) Then
+        If seg1Name <> "" And seg2Name <> "" Then
+            ClearSWSelection
+            If Not SelectSketchSegmentByName(seg1Name, False) Then GoTo FilletFail
+            If Not SelectSketchSegmentByName(seg2Name, True) Then GoTo FilletFail
+        Else
+            GoTo FilletFail
+        End If
+    End If
+    On Error Resume Next
+    Set swFillet = swSketchManager.CreateFillet(radiusM, SW_CONSTRAINED_CORNER_DELETE_GEOMETRY)
+    If swFillet Is Nothing Then
+        DebugPrint "AddSketchFilletBetweenSegments FAIL: CreateFillet " & filletLabel & _
+            " r=" & Format(radiusM * MM_PER_M, "0.####") & " mm err=" & Err.Number & " " & Err.Description
+        Err.Clear
+    Else
+        AddSketchFilletBetweenSegments = True
+        DebugPrint "AddSketchFilletBetweenSegments OK " & filletLabel & _
+            " r=" & Format(radiusM * MM_PER_M, "0.####") & " mm"
+    End If
+    ClearSWSelection
+    On Error GoTo 0
+    Exit Function
+FilletFail:
+    DebugPrint "AddSketchFilletBetweenSegments FAIL: select " & filletLabel
+End Function
+
+' Fillet each root connector line to the dedendum root arc (needsRootConnector path only).
+Private Function AddRootConnectorSketchFillets(ByVal swRootArc As SldWorks.SketchSegment, _
+    ByVal swLeftRootFlank As SldWorks.SketchSegment, _
+    ByVal swRightRootFlank As SldWorks.SketchSegment, ByVal rootFilletM As Double, _
+    ByVal rootArcName As String, ByVal leftFlankName As String, ByVal rightFlankName As String) As Boolean
+
+    Dim okLeft As Boolean
+    Dim okRight As Boolean
+
+    AddRootConnectorSketchFillets = False
+    If swRootArc Is Nothing Or swLeftRootFlank Is Nothing Or swRightRootFlank Is Nothing Then Exit Function
+
+    okLeft = AddSketchFilletBetweenSegments(swRootArc, swLeftRootFlank, rootFilletM, _
+        "rootArc+leftRootFlank", rootArcName, leftFlankName)
+    ' First fillet can replace segment refs — second corner selects by name.
+    okRight = AddSketchFilletBetweenSegments(swRootArc, swRightRootFlank, rootFilletM, _
+        "rootArc+rightRootFlank", rootArcName, rightFlankName)
+    AddRootConnectorSketchFillets = okLeft And okRight
+    If Not AddRootConnectorSketchFillets Then
+        DebugPrint "AddRootConnectorSketchFillets WARN: left=" & okLeft & " right=" & okRight & _
+            " r=" & Format(rootFilletM * MM_PER_M, "0.####") & " mm"
+    End If
+End Function
+
+' Fillet each root connector line to its involute spline flank (needsRootConnector path only).
+Private Function AddRootInvoluteConnectorSketchFillets(ByVal swLeftRootFlank As SldWorks.SketchSegment, _
+    ByVal swRightRootFlank As SldWorks.SketchSegment, _
+    ByVal swLeftInvoluteFlank As SldWorks.SketchSegment, _
+    ByVal swRightInvoluteFlank As SldWorks.SketchSegment, ByVal rootFilletM As Double, _
+    ByVal leftRootFlankName As String, ByVal rightRootFlankName As String, _
+    ByVal leftInvoluteName As String, ByVal rightInvoluteName As String) As Boolean
+
+    Dim okLeft As Boolean
+    Dim okRight As Boolean
+
+    AddRootInvoluteConnectorSketchFillets = False
+    If swLeftRootFlank Is Nothing Or swRightRootFlank Is Nothing Then Exit Function
+    If swLeftInvoluteFlank Is Nothing Or swRightInvoluteFlank Is Nothing Then Exit Function
+
+    okLeft = AddSketchFilletBetweenSegments(swLeftRootFlank, swLeftInvoluteFlank, rootFilletM, _
+        "leftRootFlank+leftInvolute", leftRootFlankName, leftInvoluteName)
+    okRight = AddSketchFilletBetweenSegments(swRightRootFlank, swRightInvoluteFlank, rootFilletM, _
+        "rightRootFlank+rightInvolute", rightRootFlankName, rightInvoluteName)
+    AddRootInvoluteConnectorSketchFillets = okLeft And okRight
+    If Not AddRootInvoluteConnectorSketchFillets Then
+        DebugPrint "AddRootInvoluteConnectorSketchFillets WARN: left=" & okLeft & " right=" & okRight & _
+            " r=" & Format(rootFilletM * MM_PER_M, "0.####") & " mm"
+    End If
+End Function
+
 Private Function SolvePitchLimitedHalfGapPitch(ByVal z As Long, ByVal rb As Double, _
     ByVal pa As Double, ByVal gapCenter As Double, ByVal halfPitch As Double, _
     ByVal targetGapRad As Double) As Double
@@ -168,6 +284,10 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
     Dim flankB As SldWorks.SketchSegment
     Dim outerArc As SldWorks.SketchSegment
     Dim rootArc As SldWorks.SketchSegment
+    Dim leftRootFlank As SldWorks.SketchSegment
+    Dim rightRootFlank As SldWorks.SketchSegment
+    Dim rootFilletM As Double
+    Dim segPrefix As String
     Dim nPts As Long
 
     DrawInvoluteToothGapSketch = False
@@ -243,6 +363,11 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
         DebugPrint "DrawInvoluteToothGapSketch FAIL: CreateSpline2"
         Exit Function
     End If
+    If needsRootConnector Then
+        segPrefix = BuildGearPrefixName()
+        TryRenameSketchSegment flankA, segPrefix & "_LeftInvoluteFlank"
+        TryRenameSketchSegment flankB, segPrefix & "_RightInvoluteFlank"
+    End If
 
     aStartX = ptsA(0)
     aStartY = ptsA(1)
@@ -284,12 +409,35 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
         aRootY = cy + rf * Sin(angA)
         bRootX = cx + rf * Cos(angB)
         bRootY = cy + rf * Sin(angB)
-        swSketchManager.CreateLine aRootX, aRootY, 0#, aStartX, aStartY, 0#
-        swSketchManager.CreateLine bStartX, bStartY, 0#, bRootX, bRootY, 0#
+        Set leftRootFlank = swSketchManager.CreateLine(aRootX, aRootY, 0#, aStartX, aStartY, 0#)
+        Set rightRootFlank = swSketchManager.CreateLine(bStartX, bStartY, 0#, bRootX, bRootY, 0#)
+        If leftRootFlank Is Nothing Or rightRootFlank Is Nothing Then
+            DebugPrint "DrawInvoluteToothGapSketch FAIL: root connector lines"
+            Exit Function
+        End If
         angRootMid = ArcMidAngleShort(Atn2(aRootY - cy, aRootX - cx), Atn2(bRootY - cy, bRootX - cx))
         xRootMidArc = cx + rf * Cos(angRootMid)
         yRootMidArc = cy + rf * Sin(angRootMid)
         Set rootArc = swSketchManager.Create3PointArc(bRootX, bRootY, 0#, aRootX, aRootY, 0#, xRootMidArc, yRootMidArc, 0#)
+        If rootArc Is Nothing Then
+            DebugPrint "DrawInvoluteToothGapSketch FAIL: root arc"
+            Exit Function
+        End If
+        segPrefix = BuildGearPrefixName()
+        TryRenameSketchSegment leftRootFlank, segPrefix & "_LeftRootFlank"
+        TryRenameSketchSegment rightRootFlank, segPrefix & "_RightRootFlank"
+        TryRenameSketchSegment rootArc, segPrefix & "_RootArc"
+        rootFilletM = GetGapRootFilletRadiusM()
+        DebugPrint "DrawInvoluteToothGapSketch: root fillet r=" & Format(rootFilletM * MM_PER_M, "0.####") & " mm"
+        If Not AddRootConnectorSketchFillets(rootArc, leftRootFlank, rightRootFlank, rootFilletM, _
+            segPrefix & "_RootArc", segPrefix & "_LeftRootFlank", segPrefix & "_RightRootFlank") Then
+            DebugPrint "DrawInvoluteToothGapSketch WARN: root connector fillets not fully applied"
+        End If
+        If Not AddRootInvoluteConnectorSketchFillets(leftRootFlank, rightRootFlank, flankA, flankB, rootFilletM, _
+            segPrefix & "_LeftRootFlank", segPrefix & "_RightRootFlank", _
+            segPrefix & "_LeftInvoluteFlank", segPrefix & "_RightInvoluteFlank") Then
+            DebugPrint "DrawInvoluteToothGapSketch WARN: root-to-involute fillets not fully applied"
+        End If
     End If
 
     If rootArc Is Nothing Then
