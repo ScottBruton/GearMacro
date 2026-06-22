@@ -40,18 +40,80 @@ Private Function ArcMidAngleShort(ByVal angStart As Double, ByVal angEnd As Doub
     ArcMidAngleShort = angStart + span / 2#
 End Function
 
-' Mirror point (xRel,yRel) about radial line at gapCenter through origin.
-Private Sub MirrorPointAboutGapCenter(ByVal gapCenter As Double, ByVal xRel As Double, ByVal yRel As Double, _
-    ByRef xMir As Double, ByRef yMir As Double)
-
-    Dim r As Double
-    Dim ang As Double
-    r = Sqr(xRel * xRel + yRel * yRel)
-    ang = Atn2(yRel, xRel)
-    ang = 2# * gapCenter - ang
-    xMir = r * Cos(ang)
-    yMir = r * Sin(ang)
+Private Sub InvoluteXYAtT(ByVal t As Double, ByVal rb As Double, ByRef x As Double, ByRef y As Double)
+    x = rb * (Cos(t) + t * Sin(t))
+    y = rb * (Sin(t) - t * Cos(t))
 End Sub
+
+Private Sub InvoluteFlankXYAtT(ByVal t As Double, ByVal rb As Double, ByVal rotRad As Double, _
+    ByVal useRotB As Boolean, ByRef xOut As Double, ByRef yOut As Double)
+
+    Dim x As Double
+    Dim y As Double
+    InvoluteXYAtT t, rb, x, y
+    If useRotB Then
+        xOut = x * Cos(rotRad) + y * Sin(rotRad)
+        yOut = x * Sin(rotRad) - y * Cos(rotRad)
+    Else
+        xOut = x * Cos(rotRad) - y * Sin(rotRad)
+        yOut = x * Sin(rotRad) + y * Cos(rotRad)
+    End If
+End Sub
+
+' Shortest angular span between two flank points at involute parameter t.
+Private Function InvoluteGapAngularWidthAtT(ByVal t As Double, ByVal rb As Double, _
+    ByVal gapCenter As Double, ByVal halfGapPitch As Double) As Double
+
+    Dim rotA As Double
+    Dim rotB As Double
+    Dim xa As Double
+    Dim ya As Double
+    Dim xb As Double
+    Dim yb As Double
+    Dim angA As Double
+    Dim angB As Double
+    Dim span As Double
+
+    rotA = gapCenter - halfGapPitch
+    rotB = gapCenter + halfGapPitch
+    InvoluteFlankXYAtT t, rb, rotA, False, xa, ya
+    InvoluteFlankXYAtT t, rb, rotB, True, xb, yb
+    angA = Atn2(ya, xa)
+    angB = Atn2(yb, xb)
+    span = angB - angA
+    Do While span > Pi
+        span = span - 2# * Pi
+    Loop
+    Do While span <= -Pi
+        span = span + 2# * Pi
+    Loop
+    InvoluteGapAngularWidthAtT = Abs(span)
+End Function
+
+' Pitch-limited stub teeth: find halfGapPitch so measured gap at pitch circle = pi/z.
+Private Function SolvePitchLimitedHalfGapPitch(ByVal z As Long, ByVal rb As Double, _
+    ByVal pa As Double, ByVal gapCenter As Double, ByVal halfPitch As Double, _
+    ByVal targetGapRad As Double) As Double
+
+    Dim tPitch As Double
+    Dim lo As Double
+    Dim hi As Double
+    Dim mid As Double
+    Dim i As Long
+
+    tPitch = Tan(pa)
+    lo = 0#
+    hi = halfPitch
+    For i = 1 To 48
+        mid = (lo + hi) / 2#
+        If InvoluteGapAngularWidthAtT(tPitch, rb, gapCenter, mid) > targetGapRad Then
+            lo = mid
+        Else
+            hi = mid
+        End If
+    Next i
+    SolvePitchLimitedHalfGapPitch = (lo + hi) / 2#
+End Function
 
 ' Builds one closed tooth-gap profile from involute parameters (metres, radians).
 Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Double, _
@@ -64,6 +126,7 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
     Dim baseGapArc As Double
     Dim halfGapPitch As Double
     Dim rotA As Double
+    Dim rotB As Double
     Dim usePitchLimitedInvolute As Boolean
     Dim negateTAtBase As Boolean
     Dim needsRootConnector As Boolean
@@ -122,13 +185,15 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
     halfGapPitch = halfPitch - invPA
 
     If baseGapArc <= 0# Then
-        ' Involute cannot start on base circle — run pitch circle to addendum only
+        ' Involute cannot start on base circle — run pitch circle to addendum only.
+        ' Rotation offset vs measured pitch gap is non-linear in z; solve for pi/z at pitch.
         usePitchLimitedInvolute = True
-        halfGapPitch = halfPitch
         needsRootConnector = True
         tMin = Tan(pa)
+        halfGapPitch = SolvePitchLimitedHalfGapPitch(z, rb, pa, gapCenter, halfPitch, toothAngle / 2#)
         DebugPrint "DrawInvoluteToothGapSketch: baseGapArc=" & Format(baseGapArc, "0.######") & _
-            " rad <= 0 z=" & z & " -> pitch-limited involute, halfGapPitch=" & Format(halfGapPitch, "0.######")
+            " rad <= 0 z=" & z & " -> pitch-limited involute, halfGapPitch=" & Format(halfGapPitch, "0.######") & _
+            " rad (solved for pitch gap=" & Format(toothAngle / 2#, "0.######") & " rad)"
     ElseIf rf < rb Then
         usePitchLimitedInvolute = False
         needsRootConnector = True
@@ -140,6 +205,7 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
     End If
 
     rotA = gapCenter - halfGapPitch
+    rotB = gapCenter + halfGapPitch
     negateTAtBase = needsRootConnector And Not usePitchLimitedInvolute
 
     tMax = Sqr((ra / rb) ^ 2# - 1#)
@@ -154,15 +220,20 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
         If negateTAtBase Then t = -t
         x = rb * (Cos(t) + t * Sin(t))
         y = rb * (Sin(t) - t * Cos(t))
-        xa = x * Cos(rotA) - y * Sin(rotA)
-        ya = x * Sin(rotA) + y * Cos(rotA)
-        MirrorPointAboutGapCenter gapCenter, xa, ya, xb, yb
+        InvoluteFlankXYAtT t, rb, rotA, False, xa, ya
+        InvoluteFlankXYAtT t, rb, rotB, True, xb, yb
         ptsA(i * 3 + 0) = cx + xa
         ptsA(i * 3 + 1) = cy + ya
         ptsA(i * 3 + 2) = 0#
-        ptsB(i * 3 + 0) = cx + xb
-        ptsB(i * 3 + 1) = cy + yb
-        ptsB(i * 3 + 2) = 0#
+        If needsRootConnector Then
+            ptsB(i * 3 + 0) = cx + xb
+            ptsB(i * 3 + 1) = cy + yb
+            ptsB(i * 3 + 2) = 0#
+        Else
+            ptsB((INVOLUTE_SPLINE_POINT_COUNT - i) * 3 + 0) = cx + xb
+            ptsB((INVOLUTE_SPLINE_POINT_COUNT - i) * 3 + 1) = cy + yb
+            ptsB((INVOLUTE_SPLINE_POINT_COUNT - i) * 3 + 2) = 0#
+        End If
     Next i
 
     On Error Resume Next
@@ -175,12 +246,19 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
 
     aStartX = ptsA(0)
     aStartY = ptsA(1)
-    bStartX = ptsB(0)
-    bStartY = ptsB(1)
     aOuterX = ptsA((INVOLUTE_SPLINE_POINT_COUNT) * 3 + 0)
     aOuterY = ptsA((INVOLUTE_SPLINE_POINT_COUNT) * 3 + 1)
-    bOuterX = ptsB((INVOLUTE_SPLINE_POINT_COUNT) * 3 + 0)
-    bOuterY = ptsB((INVOLUTE_SPLINE_POINT_COUNT) * 3 + 1)
+    If needsRootConnector Then
+        bStartX = ptsB(0)
+        bStartY = ptsB(1)
+        bOuterX = ptsB((INVOLUTE_SPLINE_POINT_COUNT) * 3 + 0)
+        bOuterY = ptsB((INVOLUTE_SPLINE_POINT_COUNT) * 3 + 1)
+    Else
+        bStartX = ptsB((nPts * 3) - 3)
+        bStartY = ptsB((nPts * 3) - 2)
+        bOuterX = ptsB(0)
+        bOuterY = ptsB(1)
+    End If
 
     ' 3-point arc with midpoint on the short OD span (CreateArc direction flag wraps the long way).
     angOuterA = Atn2(aOuterY - cy, aOuterX - cx)
@@ -220,10 +298,11 @@ Private Function DrawInvoluteToothGapSketch(ByVal cx As Double, ByVal cy As Doub
     End If
 
     DrawInvoluteToothGapSketch = True
-    DebugPrint "DrawInvoluteToothGapSketch OK z=" & z & " baseGapArc=" & Format(baseGapArc * 180# / Pi, "0.####") & _
-        " deg baseArcLen=" & Format(rb * baseGapArc * MM_PER_M, "0.###") & " mm rotA=" & Format(rotA, "0.######") & _
-        " rb=" & Format(rb * MM_PER_M, "0.###") & " ra=" & Format(ra * MM_PER_M, "0.###") & _
-        " rf=" & Format(rf * MM_PER_M, "0.###") & " mm" & _
+    DebugPrint "DrawInvoluteToothGapSketch OK [gap-math-v3] z=" & z & " baseGapArc=" & Format(baseGapArc * 180# / Pi, "0.####") & _
+        " deg gapHalf=" & Format(halfGapPitch * 180# / Pi, "0.####") & " deg pitchGap=" & _
+        Format(InvoluteGapAngularWidthAtT(tMin, rb, gapCenter, halfGapPitch) * 180# / Pi, "0.####") & " deg rotA=" & Format(rotA, "0.######") & _
+        " rotB=" & Format(rotB, "0.######") & " rb=" & Format(rb * MM_PER_M, "0.###") & _
+        " ra=" & Format(ra * MM_PER_M, "0.###") & " rf=" & Format(rf * MM_PER_M, "0.###") & " mm" & _
         IIf(usePitchLimitedInvolute, " (pitch-limited)", IIf(needsRootConnector, " (root connectors)", ""))
     On Error GoTo 0
 End Function
